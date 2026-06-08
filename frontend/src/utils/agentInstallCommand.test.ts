@@ -17,9 +17,10 @@ describe('CF Monitor agent install command', () => {
     });
 
     expect(command).toContain('/agent/install-linux.sh');
+    expect(command).toContain('raw.githubusercontent.com/kadidalax/cf-monitor');
     expect(command).toContain("'--server' 'https://worker.example.com' '--token' 'node-token'");
-    expect(command).toContain("'--binary-url'");
-    expect(command).toContain('cf-monitor-agent-linux-amd64');
+    expect(command).not.toContain("'--binary-url'");
+    expect(command).not.toContain('cf-monitor-agent-linux-amd64');
     expect(command).not.toContain('komari-monitor/komari-agent');
     expect(command).not.toContain("'-e'");
     expect(command).not.toContain("'-t'");
@@ -34,7 +35,8 @@ describe('CF Monitor agent install command', () => {
     });
 
     expect(command).toContain('install-windows.ps1');
-    expect(command).toContain('cf-monitor-agent-windows-amd64.exe');
+    expect(command).toContain('raw.githubusercontent.com/kadidalax/cf-monitor');
+    expect(command).not.toContain('cf-monitor-agent-windows-amd64.exe');
     expect(command).toContain("'-Server' 'https://worker.example.com' '-Token' 'node-token'");
     expect(command).not.toContain('komari-monitor/komari-agent');
   });
@@ -104,8 +106,22 @@ describe('CF Monitor agent install command', () => {
 
   it('keeps the full project raw URL after a GitHub proxy prefix', () => {
     expect(cfMonitorAgentScriptUrl('install-linux.sh', 'https://ghproxy.example/')).toBe(
-      'https://ghproxy.example/https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/cf-monitor/refs/heads/main/agent/install-linux.sh',
+      'https://ghproxy.example/https://raw.githubusercontent.com/kadidalax/cf-monitor/refs/heads/main/agent/install-linux.sh',
     );
+  });
+
+  it('uses a custom binary URL when provided', () => {
+    const command = buildAgentInstallCommand({
+      platform: 'linux',
+      serverUrl: 'https://worker.example.com',
+      token: 'node-token',
+      options: {
+        ...defaultAgentInstallOptions,
+        binaryUrl: 'https://example.com/cf-monitor-agent-linux-amd64',
+      },
+    });
+
+    expect(command).toContain("'--binary-url' 'https://example.com/cf-monitor-agent-linux-amd64'");
   });
 
   it('builds platform-specific project binary URLs', () => {

@@ -151,6 +151,20 @@ The agent source lives in `agent/`.
 
 After deploying the panel, log in to the admin panel, create a server node, copy its install command or token, then install the agent on your server.
 
+Linux one-line install template:
+
+```bash
+wget -qO- 'https://raw.githubusercontent.com/kadidalax/cf-monitor/refs/heads/main/agent/install-linux.sh' | sudo bash -s -- --server 'https://your-worker.workers.dev' --token 'YOUR_NODE_TOKEN'
+```
+
+Windows PowerShell install template:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "iwr 'https://raw.githubusercontent.com/kadidalax/cf-monitor/refs/heads/main/agent/install-windows.ps1' -UseBasicParsing -OutFile 'install-windows.ps1'; & '.\install-windows.ps1' -Server 'https://your-worker.workers.dev' -Token 'YOUR_NODE_TOKEN'"
+```
+
+By default the installer downloads this repository's source archive and builds the agent locally with Go. If you publish prebuilt binaries later, paste the binary URL in the admin panel's install dialog or pass `--binary-url` / `-BinaryUrl`.
+
 ## Repository Layout
 
 ```text

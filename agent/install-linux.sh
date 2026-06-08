@@ -9,6 +9,7 @@ PING_INTERVAL="30"
 MODE="websocket"
 INSTALL_DIR="/opt/cf-monitor"
 SERVICE_NAME="cf-monitor-agent"
+SOURCE_URL=""
 BINARY=""
 BINARY_URL=""
 DRY_RUN="0"
@@ -16,6 +17,8 @@ UNINSTALL="0"
 KEEP_FILES="0"
 INSTALL_GHPROXY=""
 PROXY=""
+CF_MONITOR_REPOSITORY="kadidalax/cf-monitor"
+CF_MONITOR_BRANCH="main"
 MOUNT_INCLUDE=""
 MOUNT_EXCLUDE=""
 NIC_INCLUDE=""
@@ -41,7 +44,8 @@ Options:
   --service-name NAME       systemd service name, default: cf-monitor-agent.
   --install-service-name NAME
                             Komari-compatible alias for --service-name.
-  --binary PATH             Existing agent binary. If omitted, build from current source.
+  --source-url URL          Source archive used when building from a piped installer.
+  --binary PATH             Existing agent binary. If omitted, build from current source or GitHub source archive.
   --binary-url URL          Download a prebuilt agent binary from this URL.
   --proxy URL               Proxy used for --binary-url downloads, for example http://127.0.0.1:10808.
   --mount-include LIST      Comma-separated mountpoint/device patterns included in disk totals.
@@ -69,6 +73,108 @@ run() {
   fi
 }
 
+normalize_proxy_url() {
+  local value="${1%/}"
+  printf '%s' "$value"
+}
+
+with_github_proxy() {
+  local url="$1"
+  local proxy
+  proxy="$(normalize_proxy_url "$INSTALL_GHPROXY")"
+  if [[ -n "$proxy" ]]; then
+    printf '%s/%s' "$proxy" "$url"
+  else
+    printf '%s' "$url"
+  fi
+}
+
+download_file() {
+  local url="$1"
+  local output="$2"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    if command -v curl >/dev/null 2>&1; then
+      local curl_args=(-fL --retry 3 -o "$output")
+      if [[ -n "$PROXY" ]]; then
+        curl_args+=(--proxy "$PROXY")
+      fi
+      printf '[dry-run] curl'
+      printf ' %q' "${curl_args[@]}" "$url"
+      printf '\n'
+    elif command -v wget >/dev/null 2>&1; then
+      local wget_args=(-O "$output")
+      if [[ -n "$PROXY" ]]; then
+        wget_args+=(--execute "use_proxy=yes" --execute "http_proxy=$PROXY" --execute "https_proxy=$PROXY")
+      fi
+      printf '[dry-run] wget'
+      printf ' %q' "${wget_args[@]}" "$url"
+      printf '\n'
+    else
+      echo "[dry-run] download \"$url\" to \"$output\""
+    fi
+    return
+  fi
+
+  if command -v curl >/dev/null 2>&1; then
+    local curl_args=(-fL --retry 3 -o "$output")
+    if [[ -n "$PROXY" ]]; then
+      curl_args+=(--proxy "$PROXY")
+    fi
+    curl "${curl_args[@]}" "$url"
+  elif command -v wget >/dev/null 2>&1; then
+    local wget_args=(-O "$output")
+    if [[ -n "$PROXY" ]]; then
+      wget_args+=(--execute "use_proxy=yes" --execute "http_proxy=$PROXY" --execute "https_proxy=$PROXY")
+    fi
+    wget "${wget_args[@]}" "$url"
+  else
+    echo "curl or wget is required to download files." >&2
+    exit 1
+  fi
+}
+
+resolve_build_dir() {
+  if [[ -f "$SCRIPT_DIR/main.go" ]]; then
+    printf '%s' "$SCRIPT_DIR"
+    return
+  fi
+
+  local source_archive
+  local source_dir
+  source_archive="${SOURCE_ARCHIVE:-}"
+  source_dir="${SOURCE_DIR:-}"
+  if [[ -z "$source_archive" || -z "$source_dir" ]]; then
+    source_archive="$(mktemp /tmp/cf-monitor-source.XXXXXX.tar.gz)"
+    source_dir="$(mktemp -d /tmp/cf-monitor-source.XXXXXX)"
+    SOURCE_ARCHIVE="$source_archive"
+    SOURCE_DIR="$source_dir"
+  fi
+
+  local source_url="${SOURCE_URL:-https://github.com/${CF_MONITOR_REPOSITORY}/archive/refs/heads/${CF_MONITOR_BRANCH}.tar.gz}"
+  source_url="$(with_github_proxy "$source_url")"
+  download_file "$source_url" "$source_archive" >&2
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "[dry-run] tar -xzf \"$source_archive\" -C \"$source_dir\"" >&2
+    printf '%s' "$source_dir/cf-monitor-${CF_MONITOR_BRANCH}/agent"
+    return
+  fi
+
+  if ! command -v tar >/dev/null 2>&1; then
+    echo "tar is required to extract the source archive." >&2
+    exit 1
+  fi
+
+  tar -xzf "$source_archive" -C "$source_dir"
+  local main_go
+  main_go="$(find "$source_dir" -path '*/agent/main.go' -print -quit)"
+  if [[ -z "$main_go" ]]; then
+    echo "Cannot find agent/main.go in source archive: $source_url" >&2
+    exit 1
+  fi
+  dirname "$main_go"
+}
+
 write_file() {
   local path="$1"
   local mode="$2"
@@ -91,6 +197,7 @@ while [[ $# -gt 0 ]]; do
     --mode) MODE="${2:-}"; shift 2 ;;
     --install-dir) INSTALL_DIR="${2:-}"; shift 2 ;;
     --service-name|--install-service-name) SERVICE_NAME="${2:-}"; shift 2 ;;
+    --source-url) SOURCE_URL="${2:-}"; shift 2 ;;
     --binary) BINARY="${2:-}"; shift 2 ;;
     --binary-url) BINARY_URL="${2:-}"; shift 2 ;;
     --proxy) PROXY="${2:-}"; shift 2 ;;
@@ -156,7 +263,8 @@ if [[ "$MODE" != "websocket" && "$MODE" != "http" ]]; then
   exit 1
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 WORK_BIN=""
 
 if [[ -n "$BINARY" && -n "$BINARY_URL" ]]; then
@@ -173,43 +281,10 @@ if [[ -n "$BINARY" ]]; then
 elif [[ -n "$BINARY_URL" ]]; then
   if [[ "$DRY_RUN" == "1" ]]; then
     WORK_BIN="/tmp/cf-monitor-agent.dry-run"
-    if command -v curl >/dev/null 2>&1; then
-      curl_args=(-fL --retry 3 -o "$WORK_BIN")
-      if [[ -n "$PROXY" ]]; then
-        curl_args+=(--proxy "$PROXY")
-      fi
-      printf '[dry-run] curl'
-      printf ' %q' "${curl_args[@]}" "$BINARY_URL"
-      printf '\n'
-    elif command -v wget >/dev/null 2>&1; then
-      wget_args=(-O "$WORK_BIN")
-      if [[ -n "$PROXY" ]]; then
-        wget_args+=(--execute "use_proxy=yes" --execute "http_proxy=$PROXY" --execute "https_proxy=$PROXY")
-      fi
-      printf '[dry-run] wget'
-      printf ' %q' "${wget_args[@]}" "$BINARY_URL"
-      printf '\n'
-    else
-      echo "[dry-run] download \"$BINARY_URL\" to \"$WORK_BIN\""
-    fi
+    download_file "$BINARY_URL" "$WORK_BIN"
   else
     WORK_BIN="$(mktemp /tmp/cf-monitor-agent.XXXXXX)"
-    if command -v curl >/dev/null 2>&1; then
-      curl_args=(-fL --retry 3 -o "$WORK_BIN")
-      if [[ -n "$PROXY" ]]; then
-        curl_args+=(--proxy "$PROXY")
-      fi
-      curl "${curl_args[@]}" "$BINARY_URL"
-    elif command -v wget >/dev/null 2>&1; then
-      wget_args=(-O "$WORK_BIN")
-      if [[ -n "$PROXY" ]]; then
-        wget_args+=(--execute "use_proxy=yes" --execute "http_proxy=$PROXY" --execute "https_proxy=$PROXY")
-      fi
-      wget "${wget_args[@]}" "$BINARY_URL"
-    else
-      echo "curl or wget is required to download --binary-url." >&2
-      exit 1
-    fi
+    download_file "$BINARY_URL" "$WORK_BIN"
     chmod 0755 "$WORK_BIN"
   fi
 else
@@ -219,10 +294,12 @@ else
   fi
   if [[ "$DRY_RUN" == "1" ]]; then
     WORK_BIN="/tmp/cf-monitor-agent.dry-run"
-    echo "[dry-run] cd \"$SCRIPT_DIR\" && go build -trimpath -ldflags=\"-s -w\" -o \"$WORK_BIN\" ."
+    BUILD_DIR="$(resolve_build_dir)"
+    echo "[dry-run] cd \"$BUILD_DIR\" && go build -trimpath -ldflags=\"-s -w\" -o \"$WORK_BIN\" ."
   else
     WORK_BIN="$(mktemp /tmp/cf-monitor-agent.XXXXXX)"
-    (cd "$SCRIPT_DIR" && go build -trimpath -ldflags="-s -w" -o "$WORK_BIN" .)
+    BUILD_DIR="$(resolve_build_dir)"
+    (cd "$BUILD_DIR" && go build -trimpath -ldflags="-s -w" -o "$WORK_BIN" .)
   fi
 fi
 

@@ -11,6 +11,7 @@ param(
   [string]$Mode = "websocket",
   [string]$InstallDir = "C:\Program Files\CF Monitor",
   [string]$ServiceName = "CFMonitorAgent",
+  [string]$SourceUrl = "",
   [string]$BinaryPath = "",
   [string]$BinaryUrl = "",
   [string]$Proxy = "",
@@ -65,10 +66,77 @@ if ([string]::IsNullOrWhiteSpace($InstallDir) -or [System.IO.Path]::GetPathRoot(
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $targetExe = Join-Path $InstallDir "cf-monitor-agent.exe"
 $runnerPath = Join-Path $InstallDir "run-agent.ps1"
+$repository = "kadidalax/cf-monitor"
+$branch = "main"
 
 function ConvertTo-PowerShellLiteral {
   param([string]$Value)
   return "'" + ($Value -replace "'", "''") + "'"
+}
+
+function Join-GitHubProxy {
+  param([string]$Url)
+  if ([string]::IsNullOrWhiteSpace($InstallGhproxy)) {
+    return $Url
+  }
+  return $InstallGhproxy.TrimEnd("/") + "/" + $Url
+}
+
+function Invoke-DownloadFile {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Url,
+    [Parameter(Mandatory = $true)]
+    [string]$OutFile
+  )
+
+  if ($DryRun) {
+    $proxyText = if ([string]::IsNullOrWhiteSpace($Proxy)) { "" } else { " -Proxy `"$Proxy`"" }
+    Write-Host "[dry-run] Invoke-WebRequest $Url$proxyText -OutFile `"$OutFile`""
+    return
+  }
+
+  $downloadParams = @{
+    Uri = $Url
+    UseBasicParsing = $true
+    OutFile = $OutFile
+  }
+  if (-not [string]::IsNullOrWhiteSpace($Proxy)) {
+    $downloadParams.Proxy = $Proxy
+  }
+  Invoke-WebRequest @downloadParams
+}
+
+function Resolve-BuildDirectory {
+  $localMain = Join-Path $scriptDir "main.go"
+  if (Test-Path -LiteralPath $localMain) {
+    return $scriptDir
+  }
+
+  $archiveUrl = if ([string]::IsNullOrWhiteSpace($SourceUrl)) {
+    "https://github.com/$repository/archive/refs/heads/$branch.zip"
+  } else {
+    $SourceUrl
+  }
+  $archiveUrl = Join-GitHubProxy $archiveUrl
+  $archivePath = Join-Path $env:TEMP "cf-monitor-source.zip"
+  $extractDir = Join-Path $env:TEMP ("cf-monitor-source-" + [Guid]::NewGuid().ToString("N"))
+
+  Invoke-DownloadFile -Url $archiveUrl -OutFile $archivePath
+
+  if ($DryRun) {
+    Write-Host "[dry-run] Expand-Archive -LiteralPath `"$archivePath`" -DestinationPath `"$extractDir`""
+    return (Join-Path $extractDir "cf-monitor-main\agent")
+  }
+
+  Expand-Archive -LiteralPath $archivePath -DestinationPath $extractDir -Force
+  $mainGo = Get-ChildItem -LiteralPath $extractDir -Recurse -Filter main.go |
+    Where-Object { $_.FullName -match "\\agent\\main\.go$" } |
+    Select-Object -First 1
+  if (-not $mainGo) {
+    throw "Cannot find agent/main.go in source archive: $archiveUrl"
+  }
+  return $mainGo.Directory.FullName
 }
 
 if ($Uninstall) {
@@ -108,20 +176,7 @@ if ($BinaryPath -ne "" -and $BinaryUrl -ne "") {
 
 if ($BinaryPath -eq "" -and $BinaryUrl -ne "") {
   $downloadOut = Join-Path $env:TEMP "cf-monitor-agent.exe"
-  if ($DryRun) {
-    $proxyText = if ([string]::IsNullOrWhiteSpace($Proxy)) { "" } else { " -Proxy `"$Proxy`"" }
-    Write-Host "[dry-run] Invoke-WebRequest $BinaryUrl$proxyText -OutFile `"$downloadOut`""
-  } else {
-    $downloadParams = @{
-      Uri = $BinaryUrl
-      UseBasicParsing = $true
-      OutFile = $downloadOut
-    }
-    if (-not [string]::IsNullOrWhiteSpace($Proxy)) {
-      $downloadParams.Proxy = $Proxy
-    }
-    Invoke-WebRequest @downloadParams
-  }
+  Invoke-DownloadFile -Url $BinaryUrl -OutFile $downloadOut
   $BinaryPath = $downloadOut
 }
 
@@ -131,11 +186,12 @@ if ($BinaryPath -eq "") {
     throw "Go is required to build the agent. Install Go or pass -BinaryPath."
   }
   $buildOut = Join-Path $env:TEMP "cf-monitor-agent.exe"
+  $buildDir = Resolve-BuildDirectory
   $buildCommand = "go build -trimpath -ldflags=`"-s -w`" -o `"$buildOut`" ."
   if ($DryRun) {
-    Write-Host "[dry-run] cd `"$scriptDir`"; $buildCommand"
+    Write-Host "[dry-run] cd `"$buildDir`"; $buildCommand"
   } else {
-    Push-Location $scriptDir
+    Push-Location $buildDir
     try {
       go build -trimpath -ldflags="-s -w" -o $buildOut .
     } finally {

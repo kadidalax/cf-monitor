@@ -5,6 +5,7 @@ import { LogOut, Menu, X, Home, Github, Palette, Sun, Moon, Laptop } from "lucid
 import { useAuth } from "../../contexts/AuthContext";
 import { useTheme } from "../../contexts/ThemeContext";
 import { useDisplayTheme } from "../../contexts/DisplayThemeContext";
+import { CF_MONITOR_GITHUB_URL } from "../../utils/projectLinks";
 import {
   adminMenuItems,
   isAdminMenuPathActive,
@@ -16,7 +17,7 @@ export default function AdminLayout() {
   const { displayTheme, toggleDisplayTheme } = useDisplayTheme();
   const navigate = useNavigate();
   const location = useLocation();
-  const githubUrl = "";
+  const githubUrl = CF_MONITOR_GITHUB_URL;
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [version, setVersion] = useState("v1.0.0");
 

@@ -6,13 +6,14 @@ import { Settings, Sun, Moon, Laptop, Palette, Github } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 import { useTheme } from "../contexts/ThemeContext";
 import { useDisplayTheme } from "../contexts/DisplayThemeContext";
+import { CF_MONITOR_GITHUB_URL } from "../utils/projectLinks";
 
 export default function Layout() {
   const { isAuthenticated } = useAuth();
   const { theme, setTheme } = useTheme();
   const { displayTheme, toggleDisplayTheme } = useDisplayTheme();
   const navigate = useNavigate();
-  const githubUrl = "";
+  const githubUrl = CF_MONITOR_GITHUB_URL;
   const [siteTitle, setSiteTitle] = useState("CF Monitor");
   const [siteSubtitle, setSiteSubtitle] = useState<string | null>(null);
   const [bgUrlDesktop, setBgUrlDesktop] = useState("");

@@ -1,3 +1,5 @@
+import { CF_MONITOR_REPOSITORY } from './projectLinks';
+
 export type AgentInstallPlatform = 'linux' | 'windows' | 'macos';
 
 export type AgentInstallOptions = {
@@ -24,7 +26,6 @@ export const defaultAgentInstallOptions: AgentInstallOptions = {
   nicExclude: '',
 };
 
-export const CF_MONITOR_REPOSITORY = 'YOUR_GITHUB_USERNAME/cf-monitor';
 export const CF_MONITOR_BRANCH = 'main';
 export const CF_MONITOR_RELEASE_TAG = 'latest';
 export const CF_MONITOR_AGENT_SCRIPT_BASE = `https://raw.githubusercontent.com/${CF_MONITOR_REPOSITORY}/refs/heads/${CF_MONITOR_BRANCH}/agent`;
@@ -83,7 +84,7 @@ export function buildAgentInstallCommand({
 }) {
   const ghproxy = normalizeProxyUrl(options.ghproxy);
   const downloadProxy = normalizeProxyUrl(options.downloadProxy);
-  const binaryUrl = options.binaryUrl?.trim() || cfMonitorAgentBinaryUrl(platform, ghproxy);
+  const binaryUrl = options.binaryUrl?.trim();
   const dir = options.dir.trim();
   const serviceName = options.serviceName.trim();
   const mountInclude = options.mountInclude.trim();
@@ -93,7 +94,8 @@ export function buildAgentInstallCommand({
 
   switch (platform) {
     case 'linux': {
-      const args = ['--server', serverUrl, '--token', token || '<TOKEN>', '--binary-url', binaryUrl];
+      const args = ['--server', serverUrl, '--token', token || '<TOKEN>'];
+      if (binaryUrl) args.push('--binary-url', binaryUrl);
       if (ghproxy) args.push('--install-ghproxy', ghproxy);
       if (downloadProxy) args.push('--proxy', downloadProxy);
       if (dir) args.push('--install-dir', dir);
@@ -105,7 +107,8 @@ export function buildAgentInstallCommand({
       return `wget -qO- ${shellQuote(cfMonitorAgentScriptUrl('install-linux.sh', ghproxy))} | sudo bash -s -- ${args.map(shellQuote).join(' ')}`;
     }
     case 'windows': {
-      const args = ['-Server', serverUrl, '-Token', token || '<TOKEN>', '-BinaryUrl', binaryUrl];
+      const args = ['-Server', serverUrl, '-Token', token || '<TOKEN>'];
+      if (binaryUrl) args.push('-BinaryUrl', binaryUrl);
       if (ghproxy) args.push('-InstallGhproxy', ghproxy);
       if (downloadProxy) args.push('-Proxy', downloadProxy);
       if (dir) args.push('-InstallDir', dir);
@@ -118,7 +121,8 @@ export function buildAgentInstallCommand({
         `"iwr ${psQuote(cfMonitorAgentScriptUrl('install-windows.ps1', ghproxy))} -UseBasicParsing -OutFile 'install-windows.ps1'; & '.\\install-windows.ps1' ${args.map(psQuote).join(' ')}"`;
     }
     case 'macos': {
-      const args = ['--server', serverUrl, '--token', token || '<TOKEN>', '--binary-url', binaryUrl];
+      const args = ['--server', serverUrl, '--token', token || '<TOKEN>'];
+      if (binaryUrl) args.push('--binary-url', binaryUrl);
       if (ghproxy) args.push('--install-ghproxy', ghproxy);
       if (downloadProxy) args.push('--proxy', downloadProxy);
       if (dir) args.push('--install-dir', dir);
