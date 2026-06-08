@@ -49,7 +49,7 @@ The deploy button reads the root `wrangler.toml` and provisions:
 - Static assets from `frontend/dist`
 - Cron trigger every 10 minutes
 
-The root deploy script also builds the frontend, runs Worker type checks, applies D1 migrations, and deploys the Worker.
+The root deploy script builds the frontend, runs Worker type checks, and deploys the Worker. On first request, the Worker initializes the D1 schema automatically so the deploy button can complete without a pre-existing D1 `database_id`.
 
 ## Manual Deploy
 

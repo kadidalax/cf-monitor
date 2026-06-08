@@ -11,6 +11,7 @@ import { adminRoutes } from './routes/admin';
 import { clientRoutes } from './routes/client';
 import { wsRoutes } from './routes/websocket';
 import * as db from './db/queries';
+import { ensureSchema } from './db/schema-bootstrap';
 import { AuthConfigurationError, verifyAdminToken } from './auth/jwt';
 import { getAdminSessionToken, verifyAdminCsrfToken } from './auth/session';
 import { buildAdminSettings } from './settings/schema';
@@ -404,10 +405,12 @@ async function runScheduled(env: Bindings): Promise<void> {
 }
 
 export default {
-  fetch(request: Request, env: Bindings, ctx: ExecutionContext) {
+  async fetch(request: Request, env: Bindings, ctx: ExecutionContext) {
+    await ensureSchema(env.DB);
     return app.fetch(request, env, ctx);
   },
   async scheduled(_event: ScheduledController, env: Bindings, _ctx: ExecutionContext) {
+    await ensureSchema(env.DB);
     await runScheduled(env);
   },
 };

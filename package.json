@@ -15,7 +15,7 @@
     "verify": "npm run build && npm run test && npm run test:agent",
     "local-deploy:test": "npm run build && npm --prefix worker run local-deploy:coverage && npm --prefix frontend run smoke:visual",
     "release": "node ./scripts/release.mjs",
-    "deploy": "npm run build && node ./worker/scripts/run-migrations.mjs remote DB . && node ./worker/node_modules/wrangler/bin/wrangler.js deploy --config wrangler.toml",
+    "deploy": "npm run build && node ./worker/node_modules/wrangler/bin/wrangler.js deploy --config wrangler.toml",
     "dev:worker": "npm --prefix worker run dev",
     "dev:frontend": "npm --prefix frontend run dev",
     "db:create": "npm --prefix worker run db:create",
