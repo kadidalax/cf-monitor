@@ -1,5 +1,6 @@
 const PASSWORD_ALGORITHM = 'pbkdf2_sha256';
-const PBKDF2_ITERATIONS = 210000;
+const PBKDF2_ITERATIONS = 20000;
+const MIN_ACCEPTED_PBKDF2_ITERATIONS = 10000;
 const SALT_BYTES = 16;
 const HASH_BYTES = 32;
 const LEGACY_SALT = 'cf-monitor-salt';
@@ -91,7 +92,7 @@ function parsePasswordHash(hash: string): ParsedPasswordHash | null {
 
   if (
     !Number.isInteger(iterations) ||
-    iterations < PBKDF2_ITERATIONS ||
+    iterations < MIN_ACCEPTED_PBKDF2_ITERATIONS ||
     !salt ||
     salt.length < SALT_BYTES ||
     !storedHash ||
@@ -111,6 +112,13 @@ export async function hashPassword(password: string): Promise<string> {
 
 export function needsPasswordRehash(hash: string): boolean {
   return parsePasswordHash(hash) === null;
+}
+
+export function passwordHashExceedsCurrentCost(hash: string): boolean {
+  const [algorithm, iterationsText] = hash.split('$');
+  if (algorithm !== PASSWORD_ALGORITHM) return false;
+  const iterations = Number.parseInt(iterationsText || '', 10);
+  return Number.isInteger(iterations) && iterations > PBKDF2_ITERATIONS;
 }
 
 export async function verifyPassword(password: string, hash: string): Promise<boolean> {

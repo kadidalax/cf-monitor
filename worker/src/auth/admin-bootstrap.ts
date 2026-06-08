@@ -1,5 +1,5 @@
 import * as db from '../db/queries';
-import { hashPassword } from './password';
+import { hashPassword, passwordHashExceedsCurrentCost } from './password';
 
 const MIN_INITIAL_ADMIN_PASSWORD_BYTES = 12;
 const LEGACY_DEFAULT_ADMIN = {
@@ -38,6 +38,16 @@ function readInitialAdminEnv(env: AdminBootstrapEnv): { username: string; passwo
   return { username, password };
 }
 
+function readOptionalInitialAdminEnv(env: AdminBootstrapEnv): { username: string; password: string } | null {
+  const username = env.ADMIN_USERNAME?.trim() ?? '';
+  const password = env.ADMIN_PASSWORD ?? '';
+
+  if (!username || password.length === 0) return null;
+  if (new TextEncoder().encode(password).byteLength < MIN_INITIAL_ADMIN_PASSWORD_BYTES) return null;
+
+  return { username, password };
+}
+
 function isUnchangedLegacyDefaultAdmin(user: db.User | null): boolean {
   return Boolean(
     user &&
@@ -45,6 +55,19 @@ function isUnchangedLegacyDefaultAdmin(user: db.User | null): boolean {
     user.username === LEGACY_DEFAULT_ADMIN.username &&
     user.passwd.toLowerCase() === LEGACY_DEFAULT_ADMIN.hashedPassword,
   );
+}
+
+async function bestEffortAuditLog(
+  env: AdminBootstrapEnv,
+  user: string,
+  action: string,
+  detail: string,
+): Promise<void> {
+  try {
+    await db.insertAuditLog(env.DB, user, action, detail);
+  } catch (error) {
+    console.error('[auth] admin bootstrap audit failed:', error);
+  }
 }
 
 async function createInitialAdmin(env: AdminBootstrapEnv, username: string, password: string): Promise<boolean> {
@@ -55,10 +78,26 @@ async function createInitialAdmin(env: AdminBootstrapEnv, username: string, pass
   });
 
   if (created) {
-    await db.insertAuditLog(env.DB, username, 'admin_bootstrap', 'Initialized first admin from environment variables');
+    await bestEffortAuditLog(env, username, 'admin_bootstrap', 'Initialized first admin from environment variables');
   }
 
   return created;
+}
+
+async function refreshConfiguredAdminHashIfNeeded(env: AdminBootstrapEnv): Promise<void> {
+  const configuredAdmin = readOptionalInitialAdminEnv(env);
+  if (!configuredAdmin) return;
+
+  const user = await db.getUserByUsername(env.DB, configuredAdmin.username);
+  if (!user || !passwordHashExceedsCurrentCost(user.passwd)) return;
+
+  await db.updateUserPassword(env.DB, user.uuid, await hashPassword(configuredAdmin.password));
+  await bestEffortAuditLog(
+    env,
+    configuredAdmin.username,
+    'admin_bootstrap',
+    'Refreshed initial admin password hash for Workers CPU limits',
+  );
 }
 
 export async function ensureInitialAdmin(env: AdminBootstrapEnv): Promise<void> {
@@ -72,12 +111,15 @@ export async function ensureInitialAdmin(env: AdminBootstrapEnv): Promise<void> 
     return;
   }
 
-  if (!hasUnchangedLegacyDefaultAdmin) return;
+  if (!hasUnchangedLegacyDefaultAdmin) {
+    await refreshConfiguredAdminHashIfNeeded(env);
+    return;
+  }
 
   if (userCount > 1) {
     const removed = await db.deleteUserIfMatches(env.DB, LEGACY_DEFAULT_ADMIN);
     if (removed) {
-      await db.insertAuditLog(env.DB, 'system', 'admin_bootstrap', 'Removed unchanged legacy default admin');
+      await bestEffortAuditLog(env, 'system', 'admin_bootstrap', 'Removed unchanged legacy default admin');
     }
     return;
   }
@@ -86,13 +128,13 @@ export async function ensureInitialAdmin(env: AdminBootstrapEnv): Promise<void> 
 
   if (username === LEGACY_DEFAULT_ADMIN.username) {
     await db.updateUserPassword(env.DB, LEGACY_DEFAULT_ADMIN.uuid, await hashPassword(password));
-    await db.insertAuditLog(env.DB, username, 'admin_bootstrap', 'Replaced legacy default admin password from environment variable');
+    await bestEffortAuditLog(env, username, 'admin_bootstrap', 'Replaced legacy default admin password from environment variable');
     return;
   }
 
   await createInitialAdmin(env, username, password);
   const removed = await db.deleteUserIfMatches(env.DB, LEGACY_DEFAULT_ADMIN);
   if (removed) {
-    await db.insertAuditLog(env.DB, username, 'admin_bootstrap', 'Replaced legacy default admin with environment admin');
+    await bestEffortAuditLog(env, username, 'admin_bootstrap', 'Replaced legacy default admin with environment admin');
   }
 }

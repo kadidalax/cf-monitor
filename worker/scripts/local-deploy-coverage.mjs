@@ -78,6 +78,32 @@ async function applyMigrations(mf) {
   }
 }
 
+function createMiniflare(databaseName, description = 'Local deployment coverage') {
+  return new Miniflare({
+    modules: true,
+    scriptPath: bundlePath,
+    compatibilityDate: '2025-04-01',
+    bindings: {
+      JWT_SECRET: '0123456789abcdef0123456789abcdef',
+      ADMIN_USERNAME: adminUsername,
+      ADMIN_PASSWORD: adminPassword,
+      SITE_TITLE: 'CF Monitor',
+      SITE_DESCRIPTION: description,
+    },
+    d1Databases: { DB: databaseName },
+    durableObjects: { LIVE_DATA: 'LiveDataDO', RATE_LIMIT: 'RateLimitDO' },
+    migrations: [
+      { tag: 'v1', newClasses: ['LiveDataDO'] },
+      { tag: 'v2', newClasses: ['RateLimitDO'] },
+    ],
+    serviceBindings: {
+      'api.telegram.org': async () => new Response(JSON.stringify({ ok: true }), {
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    },
+  });
+}
+
 async function request(mf, path, init = {}) {
   const response = await mf.dispatchFetch(`${baseUrl}${path}`, init);
   const text = await response.text();
@@ -113,6 +139,16 @@ async function batchRun(d1, statements, chunkSize = 80) {
   for (let i = 0; i < statements.length; i += chunkSize) {
     await d1.batch(statements.slice(i, i + chunkSize));
   }
+}
+
+async function loginAsInitialAdmin(mf, label, ip = '198.51.100.50') {
+  const login = await request(mf, '/api/login', {
+    method: 'POST',
+    headers: { ...jsonHeaders, 'CF-Connecting-IP': ip },
+    body: jsonBody({ username: adminUsername, password: adminPassword }),
+  });
+  assertOk(login, label);
+  return login;
 }
 
 async function seedCoverageData(mf) {
@@ -271,42 +307,60 @@ async function seedCoverageData(mf) {
   };
 }
 
+async function assertFreshRuntimeBootstrap() {
+  const mf = createMiniflare('fresh-runtime-bootstrap-db', 'Fresh runtime bootstrap coverage');
+  try {
+    const login = await loginAsInitialAdmin(mf, 'fresh D1 initial admin login', '198.51.100.60');
+    assert.ok(login.body.csrf_token, 'fresh D1 login should provide a CSRF token');
+
+    const d1 = await mf.getD1Database('DB');
+    const users = await d1.prepare('SELECT COUNT(*) AS count FROM users').first();
+    const auditLogs = await d1.prepare('SELECT COUNT(*) AS count FROM audit_logs').first();
+    assert.equal(Number(users?.count || 0), 1, 'fresh D1 bootstrap should create exactly one admin user');
+    assert.ok(Number(auditLogs?.count || 0) >= 1, 'fresh D1 bootstrap should write audit logs when available');
+  } finally {
+    await mf.dispose();
+  }
+}
+
+async function assertExpensiveHashRecovery() {
+  const mf = createMiniflare('expensive-hash-recovery-db', 'Expensive hash recovery coverage');
+  try {
+    const ping = await request(mf, '/ping');
+    assertOk(ping, 'schema bootstrap before expensive hash recovery');
+
+    const d1 = await mf.getD1Database('DB');
+    await d1.prepare('DELETE FROM users').run();
+    await d1.prepare('INSERT INTO users (uuid, username, passwd) VALUES (?, ?, ?)')
+      .bind(
+        'expensive-admin-uuid',
+        adminUsername,
+        'pbkdf2_sha256$210000$AAAAAAAAAAAAAAAAAAAAAA==$BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=',
+      )
+      .run();
+
+    const login = await loginAsInitialAdmin(mf, 'expensive admin hash recovery login', '198.51.100.61');
+    assert.ok(login.body.csrf_token, 'expensive hash recovery should log in successfully');
+
+    const user = await d1.prepare('SELECT passwd FROM users WHERE username = ?').bind(adminUsername).first();
+    assert.match(String(user?.passwd || ''), /^pbkdf2_sha256\$20000\$/, 'expensive hash should be refreshed to the Workers-safe cost');
+  } finally {
+    await mf.dispose();
+  }
+}
+
 async function main() {
   await bundleWorker();
-  const mf = new Miniflare({
-    modules: true,
-    scriptPath: bundlePath,
-    compatibilityDate: '2025-04-01',
-    bindings: {
-      JWT_SECRET: '0123456789abcdef0123456789abcdef',
-      ADMIN_USERNAME: adminUsername,
-      ADMIN_PASSWORD: adminPassword,
-      SITE_TITLE: 'CF Monitor',
-      SITE_DESCRIPTION: 'Local deployment coverage',
-    },
-    d1Databases: { DB: 'coverage-db' },
-    durableObjects: { LIVE_DATA: 'LiveDataDO', RATE_LIMIT: 'RateLimitDO' },
-    migrations: [
-      { tag: 'v1', newClasses: ['LiveDataDO'] },
-      { tag: 'v2', newClasses: ['RateLimitDO'] },
-    ],
-    serviceBindings: {
-      'api.telegram.org': async () => new Response(JSON.stringify({ ok: true }), {
-        headers: { 'Content-Type': 'application/json' },
-      }),
-    },
-  });
+  await assertFreshRuntimeBootstrap();
+  await assertExpensiveHashRecovery();
+
+  const mf = createMiniflare('coverage-db');
 
   try {
     await applyMigrations(mf);
     const seeded = await seedCoverageData(mf);
 
-    const login = await request(mf, '/api/login', {
-      method: 'POST',
-      headers: { ...jsonHeaders, 'CF-Connecting-IP': '198.51.100.50' },
-      body: jsonBody({ username: adminUsername, password: adminPassword }),
-    });
-    assertOk(login, 'admin login');
+    const login = await loginAsInitialAdmin(mf, 'admin login');
     const cookie = login.response.headers.get('set-cookie') || '';
     const csrfToken = login.body.csrf_token || parseCookie(cookie, 'cf_monitor_csrf');
     const sessionToken = parseCookie(cookie, 'cf_monitor_session');
@@ -448,6 +502,8 @@ async function main() {
       gpu_records_seeded: 8 * 36 + 12,
       ping_records_seeded: seeded.clients.length * 48 + 16 * 48 + 12,
       capacity_rows_after_cleanup: postCleanupCapacity.body.actual_row_counts,
+      fresh_runtime_bootstrap: true,
+      expensive_hash_recovery: true,
       screenshots: 'run npm --prefix frontend run smoke:visual for UI screenshots',
     }, null, 2));
   } finally {
