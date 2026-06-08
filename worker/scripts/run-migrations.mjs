@@ -3,11 +3,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const workerRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const mode = process.argv[2] === 'remote' ? 'remote' : 'local';
 const d1Name = process.argv[3] || (mode === 'remote' ? 'DB' : 'cf-monitor-db');
-const migrationsDir = path.join(root, 'migrations');
-const wranglerBin = path.join(root, 'node_modules', 'wrangler', 'bin', 'wrangler.js');
+const configRoot = process.argv[4] ? path.resolve(process.cwd(), process.argv[4]) : workerRoot;
+const migrationsDir = path.join(workerRoot, 'migrations');
+const wranglerBin = path.join(workerRoot, 'node_modules', 'wrangler', 'bin', 'wrangler.js');
+const configPath = path.join(configRoot, 'wrangler.toml');
 
 const migrations = [
   '001_init.sql',
@@ -20,13 +22,13 @@ const migrations = [
 ];
 
 function wranglerArgs(extraArgs) {
-  return [wranglerBin, 'd1', 'execute', d1Name, mode === 'remote' ? '--remote' : '--local', ...extraArgs];
+  return [wranglerBin, 'd1', 'execute', d1Name, mode === 'remote' ? '--remote' : '--local', `--config=${configPath}`, ...extraArgs];
 }
 
 function runWrangler(args, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, args, {
-      cwd: root,
+      cwd: configRoot,
       shell: false,
       stdio: options.capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
     });
