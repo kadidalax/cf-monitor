@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+worker/node_modules/
+
+# Build outputs
+frontend/dist/
+worker/dist/
+worker/.tmp/
+release/
+
+# Cloudflare local state and secrets
+worker/.wrangler/
+worker/.dev.vars
+.dev.vars
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Generated binaries
+*.exe
+agent/cf-monitor-agent.exe
