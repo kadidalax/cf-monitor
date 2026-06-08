@@ -29,7 +29,7 @@ export const defaultAgentInstallOptions: AgentInstallOptions = {
 export const CF_MONITOR_BRANCH = 'main';
 export const CF_MONITOR_RELEASE_TAG = 'latest';
 export const CF_MONITOR_AGENT_SCRIPT_BASE = `https://raw.githubusercontent.com/${CF_MONITOR_REPOSITORY}/refs/heads/${CF_MONITOR_BRANCH}/agent`;
-export const CF_MONITOR_RELEASE_BASE = `https://github.com/${CF_MONITOR_REPOSITORY}/releases/download/${CF_MONITOR_RELEASE_TAG}`;
+export const CF_MONITOR_RELEASE_BASE = `https://github.com/${CF_MONITOR_REPOSITORY}/releases/${CF_MONITOR_RELEASE_TAG}/download`;
 
 export function normalizeServerUrl(value: string, fallback: string) {
   const raw = value.trim() || fallback;

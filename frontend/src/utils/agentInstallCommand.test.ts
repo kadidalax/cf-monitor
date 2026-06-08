@@ -125,6 +125,7 @@ describe('CF Monitor agent install command', () => {
   });
 
   it('builds platform-specific project binary URLs', () => {
+    expect(cfMonitorAgentBinaryUrl('linux')).toContain('/releases/latest/download/');
     expect(cfMonitorAgentBinaryUrl('linux')).toContain('cf-monitor-agent-linux-amd64');
     expect(cfMonitorAgentBinaryUrl('macos')).toContain('cf-monitor-agent-darwin-amd64');
     expect(cfMonitorAgentBinaryUrl('windows')).toContain('cf-monitor-agent-windows-amd64.exe');

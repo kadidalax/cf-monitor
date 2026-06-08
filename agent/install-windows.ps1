@@ -12,6 +12,7 @@ param(
   [string]$InstallDir = "C:\Program Files\CF Monitor",
   [string]$ServiceName = "CFMonitorAgent",
   [string]$SourceUrl = "",
+  [switch]$BuildFromSource,
   [string]$BinaryPath = "",
   [string]$BinaryUrl = "",
   [string]$Proxy = "",
@@ -68,6 +69,7 @@ $targetExe = Join-Path $InstallDir "cf-monitor-agent.exe"
 $runnerPath = Join-Path $InstallDir "run-agent.ps1"
 $repository = "kadidalax/cf-monitor"
 $branch = "main"
+$releaseBase = "https://github.com/$repository/releases/latest/download"
 
 function ConvertTo-PowerShellLiteral {
   param([string]$Value)
@@ -139,6 +141,19 @@ function Resolve-BuildDirectory {
   return $mainGo.Directory.FullName
 }
 
+function Get-DefaultBinaryUrl {
+  $arch = switch ($env:PROCESSOR_ARCHITECTURE.ToLowerInvariant()) {
+    "amd64" { "amd64" }
+    "x86" { "386" }
+    "arm64" { "amd64" }
+    default { "amd64" }
+  }
+  if ($arch -ne "amd64") {
+    throw "Unsupported Windows CPU architecture for prebuilt agent: $env:PROCESSOR_ARCHITECTURE"
+  }
+  return Join-GitHubProxy "$releaseBase/cf-monitor-agent-windows-amd64.exe"
+}
+
 if ($Uninstall) {
   $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
   if ($existing) {
@@ -170,8 +185,16 @@ if ([string]::IsNullOrWhiteSpace($Server) -or [string]::IsNullOrWhiteSpace($Toke
   throw "-Server and -Token are required for install or upgrade."
 }
 
-if ($BinaryPath -ne "" -and $BinaryUrl -ne "") {
-  throw "Use either -BinaryPath or -BinaryUrl, not both."
+if ($BinaryPath -ne "" -and ($BinaryUrl -ne "" -or $BuildFromSource)) {
+  throw "Use only one of -BinaryPath, -BinaryUrl, or -BuildFromSource."
+}
+
+if ($BinaryUrl -ne "" -and $BuildFromSource) {
+  throw "Use only one of -BinaryUrl or -BuildFromSource."
+}
+
+if ($BinaryPath -eq "" -and $BinaryUrl -eq "" -and -not $BuildFromSource) {
+  $BinaryUrl = Get-DefaultBinaryUrl
 }
 
 if ($BinaryPath -eq "" -and $BinaryUrl -ne "") {
@@ -180,10 +203,10 @@ if ($BinaryPath -eq "" -and $BinaryUrl -ne "") {
   $BinaryPath = $downloadOut
 }
 
-if ($BinaryPath -eq "") {
+if ($BinaryPath -eq "" -and $BuildFromSource) {
   $go = Get-Command go -ErrorAction SilentlyContinue
   if (-not $go -and -not $DryRun) {
-    throw "Go is required to build the agent. Install Go or pass -BinaryPath."
+    throw "Go is required for -BuildFromSource. Use the default prebuilt install or pass -BinaryUrl."
   }
   $buildOut = Join-Path $env:TEMP "cf-monitor-agent.exe"
   $buildDir = Resolve-BuildDirectory

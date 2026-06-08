@@ -277,7 +277,7 @@ function GenerateCommandDialog({ client, open, onOpenChange }: { client: AdminCl
             <FieldInput label="下载代理" value={installOptions.downloadProxy} onChange={(v) => setOption('downloadProxy', v)} placeholder="例如 http://127.0.0.1:10808" />
             <FieldInput label="安装目录" value={installOptions.dir} onChange={(v) => setOption('dir', v)} placeholder={platform === 'windows' ? 'C:\\Program Files\\CF Monitor' : '/opt/cf-monitor'} />
             <FieldInput label="服务名称" value={installOptions.serviceName} onChange={(v) => setOption('serviceName', v)} placeholder={platform === 'windows' ? 'CFMonitorAgent' : 'cf-monitor-agent'} />
-            <FieldInput label="二进制下载地址" value={installOptions.binaryUrl || ''} onChange={(v) => setOption('binaryUrl', v)} placeholder="为空则从项目源码构建" />
+            <FieldInput label="二进制下载地址" value={installOptions.binaryUrl || ''} onChange={(v) => setOption('binaryUrl', v)} placeholder="为空则自动下载预编译二进制" />
             <FieldInput label="磁盘包含" value={installOptions.mountInclude} onChange={(v) => setOption('mountInclude', v)} placeholder="例如 /,/data,/dev/sd*" />
             <FieldInput label="磁盘排除" value={installOptions.mountExclude} onChange={(v) => setOption('mountExclude', v)} placeholder="例如 /boot,tmpfs,/run" />
             <FieldInput label="网卡包含" value={installOptions.nicInclude} onChange={(v) => setOption('nicInclude', v)} placeholder="例如 eth*,ens*" />

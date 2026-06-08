@@ -1210,6 +1210,9 @@ html[data-monitor-theme='next'] .node-network-value strong {
 
 .admin-page-hero {
   min-height: 38px;
+  width: 100%;
+  display: flex;
+  justify-content: center;
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -1218,23 +1221,25 @@ html[data-monitor-theme='next'] .node-network-value strong {
 }
 
 .admin-overview-strip {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: repeat(4, minmax(172px, 1fr));
+  width: max-content;
+  max-width: 100%;
+  margin-inline: auto;
+  display: inline-grid;
+  grid-template-columns: repeat(4, minmax(168px, max-content));
   justify-content: center;
   gap: 6px;
   overflow-x: auto;
   overflow-y: hidden;
-  padding: 0 178px 0 0;
+  padding: 0;
 }
 
 .admin-overview-item {
   min-width: 0;
-  min-height: 74px;
+  min-height: 44px;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 10px 12px;
+  padding: 8px 12px;
   border: 1px solid var(--monitor-border);
   border-radius: var(--monitor-card-radius);
   background: var(--monitor-panel-strong);
@@ -1443,11 +1448,12 @@ html[data-monitor-theme='next'] .node-network-value strong {
 .admin-overview-line {
   min-width: 0;
   height: 100%;
-  flex-direction: column !important;
+  flex-direction: row !important;
   align-items: center !important;
   justify-content: center;
-  gap: 5px !important;
+  gap: 8px !important;
   text-align: center;
+  white-space: nowrap;
 }
 
 .admin-overview-label {
@@ -1461,7 +1467,7 @@ html[data-monitor-theme='next'] .node-network-value strong {
   display: block;
   margin-left: 0;
   font-family: var(--font-mono);
-  font-size: 18px !important;
+  font-size: 16px !important;
   line-height: 1.12 !important;
   text-align: center;
   white-space: nowrap;
@@ -1470,8 +1476,8 @@ html[data-monitor-theme='next'] .node-network-value strong {
 }
 
 .admin-overview-icon {
-  width: 26px;
-  height: 26px;
+  width: 24px;
+  height: 24px;
   display: inline-flex;
   align-items: center;
   justify-content: center;

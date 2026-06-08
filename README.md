@@ -163,7 +163,7 @@ Windows PowerShell install template:
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "iwr 'https://raw.githubusercontent.com/kadidalax/cf-monitor/refs/heads/main/agent/install-windows.ps1' -UseBasicParsing -OutFile 'install-windows.ps1'; & '.\install-windows.ps1' -Server 'https://your-worker.workers.dev' -Token 'YOUR_NODE_TOKEN'"
 ```
 
-By default the installer downloads this repository's source archive and builds the agent locally with Go. If you publish prebuilt binaries later, paste the binary URL in the admin panel's install dialog or pass `--binary-url` / `-BinaryUrl`.
+By default the installer downloads the latest prebuilt agent binary from GitHub Releases. No Go compiler is required on the VPS. If you need a custom binary, paste its URL in the admin panel's install dialog or pass `--binary-url` / `-BinaryUrl`.
 
 ## Repository Layout
 

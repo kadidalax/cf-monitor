@@ -2,13 +2,14 @@ import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
 import { mkdir, readFile, rm } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as esbuild from 'esbuild';
 import { Miniflare } from 'miniflare';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const workerRoot = resolve(scriptDir, '..');
-const tmpDir = resolve(workerRoot, '.tmp');
+const tmpDir = resolve(workerRoot, '.tmp', `smoke-e2e-${process.pid}-${Date.now()}`);
 const bundlePath = resolve(tmpDir, 'smoke-worker.mjs');
 const baseUrl = 'http://cf-monitor.test';
 const adminUsername = 'admin';
@@ -28,6 +29,19 @@ const migrations = [
 const telegramRequests = [];
 let telegramShouldFail = false;
 let expectedCronFailureLog = false;
+
+async function removeWithRetry(path, options, attempts = 5) {
+  for (let index = 0; index < attempts; index += 1) {
+    try {
+      await rm(path, options);
+      return;
+    } catch (error) {
+      const shouldRetry = ['EBUSY', 'ENOTEMPTY', 'EPERM'].includes(error?.code);
+      if (!shouldRetry || index === attempts - 1) throw error;
+      await delay(150 * (index + 1));
+    }
+  }
+}
 
 const originalConsoleError = console.error.bind(console);
 console.error = (...args) => {
@@ -1195,7 +1209,7 @@ async function main() {
     console.log('Smoke E2E passed: login, security headers, node create, agent report IP change, live view, public cache/rate-limit, history, ping task/result, telegram test, health, failure observability.');
   } finally {
     await mf.dispose();
-    await rm(tmpDir, { recursive: true, force: true });
+    await removeWithRetry(tmpDir, { recursive: true, force: true });
   }
 }
 

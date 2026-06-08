@@ -10,6 +10,7 @@ MODE="websocket"
 INSTALL_DIR="/opt/cf-monitor"
 SERVICE_NAME="cf-monitor-agent"
 SOURCE_URL=""
+BUILD_FROM_SOURCE="0"
 BINARY=""
 BINARY_URL=""
 DRY_RUN="0"
@@ -19,6 +20,7 @@ INSTALL_GHPROXY=""
 PROXY=""
 CF_MONITOR_REPOSITORY="kadidalax/cf-monitor"
 CF_MONITOR_BRANCH="main"
+CF_MONITOR_RELEASE_BASE="https://github.com/${CF_MONITOR_REPOSITORY}/releases/latest/download"
 MOUNT_INCLUDE=""
 MOUNT_EXCLUDE=""
 NIC_INCLUDE=""
@@ -44,9 +46,10 @@ Options:
   --service-name NAME       systemd service name, default: cf-monitor-agent.
   --install-service-name NAME
                             Komari-compatible alias for --service-name.
-  --source-url URL          Source archive used when building from a piped installer.
-  --binary PATH             Existing agent binary. If omitted, build from current source or GitHub source archive.
+  --binary PATH             Existing agent binary.
   --binary-url URL          Download a prebuilt agent binary from this URL.
+  --build-from-source       Build from local source or GitHub source archive. Requires Go.
+  --source-url URL          Source archive used with --build-from-source.
   --proxy URL               Proxy used for --binary-url downloads, for example http://127.0.0.1:10808.
   --mount-include LIST      Comma-separated mountpoint/device patterns included in disk totals.
   --mount-exclude LIST      Comma-separated mountpoint/device patterns excluded from disk totals.
@@ -175,6 +178,33 @@ resolve_build_dir() {
   dirname "$main_go"
 }
 
+detect_binary_filename() {
+  local os
+  local arch
+  os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  arch="$(uname -m | tr '[:upper:]' '[:lower:]')"
+
+  case "$os" in
+    linux) os="linux" ;;
+    darwin) os="darwin" ;;
+    *) echo "Unsupported OS for prebuilt agent: $os" >&2; exit 1 ;;
+  esac
+
+  case "$arch" in
+    x86_64|amd64) arch="amd64" ;;
+    aarch64|arm64) arch="arm64" ;;
+    *) echo "Unsupported CPU architecture for prebuilt agent: $arch" >&2; exit 1 ;;
+  esac
+
+  printf 'cf-monitor-agent-%s-%s' "$os" "$arch"
+}
+
+default_binary_url() {
+  local filename
+  filename="$(detect_binary_filename)" || exit 1
+  printf '%s/%s' "$CF_MONITOR_RELEASE_BASE" "$filename"
+}
+
 write_file() {
   local path="$1"
   local mode="$2"
@@ -197,6 +227,7 @@ while [[ $# -gt 0 ]]; do
     --mode) MODE="${2:-}"; shift 2 ;;
     --install-dir) INSTALL_DIR="${2:-}"; shift 2 ;;
     --service-name|--install-service-name) SERVICE_NAME="${2:-}"; shift 2 ;;
+    --build-from-source) BUILD_FROM_SOURCE="1"; shift ;;
     --source-url) SOURCE_URL="${2:-}"; shift 2 ;;
     --binary) BINARY="${2:-}"; shift 2 ;;
     --binary-url) BINARY_URL="${2:-}"; shift 2 ;;
@@ -267,8 +298,13 @@ SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 WORK_BIN=""
 
-if [[ -n "$BINARY" && -n "$BINARY_URL" ]]; then
-  echo "Use either --binary or --binary-url, not both." >&2
+if [[ -n "$BINARY" && ( -n "$BINARY_URL" || "$BUILD_FROM_SOURCE" == "1" ) ]]; then
+  echo "Use only one of --binary, --binary-url, or --build-from-source." >&2
+  exit 1
+fi
+
+if [[ -n "$BINARY_URL" && "$BUILD_FROM_SOURCE" == "1" ]]; then
+  echo "Use only one of --binary-url or --build-from-source." >&2
   exit 1
 fi
 
@@ -278,6 +314,14 @@ if [[ -n "$BINARY" ]]; then
     exit 1
   fi
   WORK_BIN="$BINARY"
+else
+  if [[ -z "$BINARY_URL" && "$BUILD_FROM_SOURCE" != "1" ]]; then
+    BINARY_URL="$(with_github_proxy "$(default_binary_url)")"
+  fi
+fi
+
+if [[ -n "$BINARY" ]]; then
+  :
 elif [[ -n "$BINARY_URL" ]]; then
   if [[ "$DRY_RUN" == "1" ]]; then
     WORK_BIN="/tmp/cf-monitor-agent.dry-run"
@@ -287,9 +331,9 @@ elif [[ -n "$BINARY_URL" ]]; then
     download_file "$BINARY_URL" "$WORK_BIN"
     chmod 0755 "$WORK_BIN"
   fi
-else
+elif [[ "$BUILD_FROM_SOURCE" == "1" ]]; then
   if [[ "$DRY_RUN" != "1" ]] && ! command -v go >/dev/null 2>&1; then
-    echo "Go is required to build the agent. Install Go or pass --binary PATH." >&2
+    echo "Go is required for --build-from-source. Use the default prebuilt install or pass --binary-url." >&2
     exit 1
   fi
   if [[ "$DRY_RUN" == "1" ]]; then
