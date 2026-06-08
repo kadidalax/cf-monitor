@@ -172,6 +172,7 @@ docs/       analysis and local deployment notes
 
 ```bash
 npm run doctor              # deployment configuration check
+npm run cf:smoke            # clean local Cloudflare deploy-button smoke test
 npm run build               # frontend build + Worker type check
 npm run deploy              # build + remote D1 migrations + Worker deploy
 npm run verify              # build + tests + agent tests

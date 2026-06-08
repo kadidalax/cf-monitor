@@ -10,6 +10,7 @@
   "scripts": {
     "build": "npm --prefix frontend run build && npm --prefix worker run build",
     "doctor": "node ./scripts/doctor.mjs",
+    "cf:smoke": "node ./scripts/cloudflare-deploy-smoke.mjs",
     "test": "npm --prefix frontend test && node ./scripts/frontend-smoke.mjs && npm --prefix worker run smoke:e2e",
     "test:agent": "cd agent && go test ./... -timeout 60s",
     "verify": "npm run build && npm run test && npm run test:agent",

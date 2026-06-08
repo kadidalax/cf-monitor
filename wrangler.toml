@@ -19,11 +19,11 @@ class_name = "RateLimitDO"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["LiveDataDO"]
+new_sqlite_classes = ["LiveDataDO"]
 
 [[migrations]]
 tag = "v2"
-new_classes = ["RateLimitDO"]
+new_sqlite_classes = ["RateLimitDO"]
 
 [vars]
 SITE_TITLE = "CF Monitor"
