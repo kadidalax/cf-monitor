@@ -254,7 +254,7 @@ async function installApiMocks(page) {
     if (pathname === '/api/live/clients') return route.fulfill(jsonPayload(liveSnapshot));
     if (pathname === '/api/ws/live-token') return route.fulfill(jsonPayload({ token: '', expires_at: Date.now() + 600000 }));
     if (pathname === '/api/me') return route.fulfill(jsonPayload({ uuid: 'admin', username: 'admin' }));
-    if (pathname === '/api/version') return route.fulfill(jsonPayload({ version: '1.0.0' }));
+    if (pathname === '/api/version') return route.fulfill(jsonPayload({ version: '2.0.0' }));
     if (pathname === '/api/admin/clients') return route.fulfill(jsonPayload(clients));
     if (pathname === '/api/admin/settings') return route.fulfill(jsonPayload(adminSettings));
     if (pathname === '/api/admin/capacity') return route.fulfill(jsonPayload(capacityEstimate));

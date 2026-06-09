@@ -17,11 +17,11 @@ import Loading from '../../components/Loading';
 import { useApi } from '../../contexts/AuthContext';
 
 interface LogEntry {
-  user: string;
+  user?: string | null;
   id: number;
-  action: string;
-  detail: string;
-  level: string;
+  action?: string | null;
+  detail?: string | null;
+  level?: string | null;
   time: string;
 }
 
@@ -48,6 +48,15 @@ const actionLabels: Record<string, { label: string; color: string }> = {
   init: { label: '系统初始化', color: 'gray' },
 };
 
+export function getAuditLogDetailText(detail: unknown) {
+  return typeof detail === 'string' && detail.trim() ? detail : '-';
+}
+
+export function formatAuditLogDetailPreview(detail: unknown, maxLength = 120) {
+  const text = getAuditLogDetailText(detail);
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
 function SummaryCards({
   logs,
   pageSize,
@@ -59,7 +68,7 @@ function SummaryCards({
 }) {
   const userCount = new Set(logs.map((log) => log.user).filter(Boolean)).size;
   const highRiskCount = logs.filter((log) =>
-    ['client_remove', 'record_clear', 'record_clear_all', 'backup_restore', 'ping_delete'].includes(log.action),
+    ['client_remove', 'record_clear', 'record_clear_all', 'backup_restore', 'ping_delete'].includes(log.action || ''),
   ).length;
   const todayCount = logs.filter((log) => {
     const now = new Date();
@@ -108,18 +117,35 @@ export default function AdminAuditLogs() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState('50');
   const [selectedLog, setSelectedLog] = useState<LogEntry | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    let cancelled = false;
     setLoading(true);
-    apiFetch(`/admin/logs?limit=${pageSize}&page=${page}`).then(data => {
-      if (data && typeof data === 'object') {
-        if (Array.isArray((data as any).data)) setLogs((data as any).data);
-        setTotal(Number((data as any).total || 0));
-        setHasMore(Boolean((data as any).has_more));
-      }
-      setLoading(false);
-    });
-  }, [page, pageSize]);
+    setError(null);
+    apiFetch(`/admin/logs?limit=${pageSize}&page=${page}`)
+      .then(data => {
+        if (cancelled) return;
+        if (data && typeof data === 'object') {
+          if (Array.isArray((data as any).data)) setLogs((data as any).data);
+          setTotal(Number((data as any).total || 0));
+          setHasMore(Boolean((data as any).has_more));
+        }
+      })
+      .catch((loadError: unknown) => {
+        if (cancelled) return;
+        setLogs([]);
+        setTotal(0);
+        setHasMore(false);
+        setError(loadError instanceof Error ? loadError.message : '审计日志加载失败');
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [apiFetch, page, pageSize]);
 
   const filteredLogs = useMemo(() => {
     return logs.filter(log => {
@@ -137,7 +163,7 @@ export default function AdminAuditLogs() {
     });
   }, [logs, filter, search]);
 
-  const uniqueActions = Array.from(new Set(logs.map(l => l.action)));
+  const uniqueActions = Array.from(new Set(logs.map(l => l.action).filter((action): action is string => Boolean(action))));
   const knownPages = Math.max(page, Math.ceil(total / Number(pageSize || 50)));
   const pageLabel = hasMore ? `第 ${page} 页，至少 ${total} 条` : `第 ${page} / ${knownPages} 页，共 ${total} 条`;
 
@@ -148,7 +174,7 @@ export default function AdminAuditLogs() {
       <Flex className="admin-audit-page" direction="column" gap="4">
         <Flex className="admin-parent-title-row" align="center" justify="between" gap="3" wrap="wrap">
           <Flex align="center" gap="2">
-            <ScrollText size={24} />
+            <ScrollText size={20} />
             <Heading size="5">审计日志</Heading>
           </Flex>
         </Flex>
@@ -158,6 +184,13 @@ export default function AdminAuditLogs() {
           pageSize={pageSize}
           onPageSizeChange={(value) => { setPage(1); setPageSize(value); }}
         />
+
+        {error && (
+          <Card className="admin-error-card">
+            <Text size="2" color="red" weight="bold">审计日志加载失败</Text>
+            <Text size="1" color="gray" style={{ display: 'block', marginTop: 4 }}>{error}</Text>
+          </Card>
+        )}
 
         <Card>
           <Flex gap="3" align="center" wrap="wrap">
@@ -202,7 +235,7 @@ export default function AdminAuditLogs() {
             </Table.Header>
             <Table.Body>
               {filteredLogs.map(log => {
-                const actionInfo = actionLabels[log.action];
+                const actionInfo = log.action ? actionLabels[log.action] : undefined;
                 return (
                   <Table.Row key={log.id}>
                     <Table.Cell>
@@ -220,12 +253,12 @@ export default function AdminAuditLogs() {
                     </Table.Cell>
                     <Table.Cell>
                       <Badge size="1" variant="soft" color={(actionInfo?.color as any) || 'gray'}>
-                        {actionInfo?.label || log.action}
+                        {actionInfo?.label || log.action || '-'}
                       </Badge>
                     </Table.Cell>
                     <Table.Cell>
                       <Text size="1" color="gray">
-                        {log.detail.length > 120 ? log.detail.slice(0, 120) + '...' : log.detail}
+                        {formatAuditLogDetailPreview(log.detail)}
                       </Text>
                     </Table.Cell>
                   </Table.Row>
@@ -261,8 +294,8 @@ export default function AdminAuditLogs() {
           {selectedLog && (
             <Flex direction="column" gap="3">
               <Flex justify="between" align="center">
-                <Badge variant="soft" color={(actionLabels[selectedLog.action]?.color as any) || 'gray'}>
-                  {actionLabels[selectedLog.action]?.label || selectedLog.action}
+                <Badge variant="soft" color={(selectedLog.action ? actionLabels[selectedLog.action]?.color as any : undefined) || 'gray'}>
+                  {selectedLog.action ? actionLabels[selectedLog.action]?.label || selectedLog.action : '-'}
                 </Badge>
                 <Text size="1" color="gray">{new Date(selectedLog.time).toLocaleString('zh-CN')}</Text>
               </Flex>
@@ -271,10 +304,10 @@ export default function AdminAuditLogs() {
                   <Text size="2"><strong>ID:</strong> {selectedLog.id}</Text>
                   <Text size="2"><strong>用户:</strong> {selectedLog.user || '-'}</Text>
                   <Text size="2"><strong>级别:</strong> {selectedLog.level || 'info'}</Text>
-                  <Text size="2"><strong>动作:</strong> {selectedLog.action}</Text>
+                  <Text size="2"><strong>动作:</strong> {selectedLog.action || '-'}</Text>
                   <Text size="2"><strong>详情:</strong></Text>
                   <Text size="2" color="gray" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-                    {selectedLog.detail}
+                    {getAuditLogDetailText(selectedLog.detail)}
                   </Text>
                 </Flex>
               </Card>

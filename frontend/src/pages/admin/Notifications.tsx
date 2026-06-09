@@ -1,20 +1,28 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useCallback, useEffect, useState, useMemo } from 'react';
 import {
   Flex, Card, Text, Button, TextField,
   Dialog, Badge, Switch, Table, Tabs, Select,
   Box, Checkbox,
 } from '@radix-ui/themes';
 import { Plus, Pencil, Trash2, Search, Send, Save, Unplug, TrendingUp, Bell, CalendarClock } from 'lucide-react';
-import { useParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
 import { useApi } from '../../contexts/AuthContext';
 import { SettingCard, SettingInput, SettingToggle } from '../../components/admin/SettingCard';
 
+const notificationTabValues = ['settings', 'offline', 'expiry', 'load'] as const;
+type NotificationTab = typeof notificationTabValues[number];
+
+function toNotificationTab(value?: string): NotificationTab {
+  return notificationTabValues.includes(value as NotificationTab) ? value as NotificationTab : 'settings';
+}
+
 export default function AdminNotifications() {
   const apiFetch = useApi();
+  const navigate = useNavigate();
   const { tab: urlTab } = useParams<{ tab?: string }>();
-  const [activeTab, setActiveTab] = useState(urlTab || 'offline');
+  const [activeTab, setActiveTab] = useState<NotificationTab>(() => toNotificationTab(urlTab));
   const [loading, setLoading] = useState(true);
   const [offlineNotifications, setOfflineNotifications] = useState<any[]>([]);
   const [expiryNotifications, setExpiryNotifications] = useState<any[]>([]);
@@ -43,29 +51,46 @@ export default function AdminNotifications() {
   const [loadForm, setLoadForm] = useState<Record<string, any>>({});
 
   useEffect(() => {
-    if (urlTab === 'settings' || urlTab === 'offline' || urlTab === 'expiry' || urlTab === 'load') setActiveTab(urlTab);
+    setActiveTab(toNotificationTab(urlTab));
   }, [urlTab]);
 
-  const loadData = async () => {
-    const [offData, expiryData, loadData, clientsData, settingsData] = await Promise.all([
+  const handleTabChange = (value: string) => {
+    const nextTab = toNotificationTab(value);
+    setActiveTab(nextTab);
+    navigate(`/admin/notifications/${nextTab}`);
+  };
+
+  const loadData = useCallback(async (showSpinner = false) => {
+    if (showSpinner) setLoading(true);
+    const results = await Promise.allSettled([
       apiFetch('/admin/notification/offline'),
       apiFetch('/admin/notification/expiry'),
       apiFetch('/admin/notification/load'),
       apiFetch('/admin/clients'),
       apiFetch('/admin/settings'),
     ]);
+    let failed = 0;
+    const [offData, expiryData, loadRulesData, clientsData, settingsData] = results.map((result) => {
+      if (result.status === 'fulfilled') return result.value;
+      failed += 1;
+      return null;
+    });
+
     if (Array.isArray(offData)) setOfflineNotifications(offData);
     if (Array.isArray(expiryData)) setExpiryNotifications(expiryData);
-    if (Array.isArray(loadData)) setLoadNotifications(loadData.map((item: any) => ({
+    if (Array.isArray(loadRulesData)) setLoadNotifications(loadRulesData.map((item: any) => ({
       ...item,
       clients: Array.isArray(item.clients) ? item.clients : [],
     })));
     if (Array.isArray(clientsData)) setClients(clientsData);
     if (settingsData && typeof settingsData === 'object') setSettings(settingsData as Record<string, string>);
+    if (failed > 0) {
+      toast.error(`${failed} 个通知数据接口加载失败，请稍后刷新`);
+    }
     setLoading(false);
-  };
+  }, [apiFetch]);
 
-  useEffect(() => { loadData(); }, []);
+  useEffect(() => { loadData(true); }, [loadData]);
 
   // ─── Offline: search + filter ───
   const notificationMap = useMemo(() => {
@@ -391,7 +416,7 @@ export default function AdminNotifications() {
         </Flex>
       </Flex>
 
-      <Tabs.Root value={activeTab} onValueChange={setActiveTab}>
+      <Tabs.Root value={activeTab} onValueChange={handleTabChange}>
         <Flex className="admin-subnav-action-row" justify="between" align="center" wrap="wrap" gap="3" mb="3">
           <Tabs.List className="admin-subnav-row">
             <Tabs.Trigger value="settings">

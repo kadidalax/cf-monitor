@@ -16,7 +16,7 @@ import {
   Text,
   TextField,
 } from '@radix-ui/themes';
-import { ArrowDown, ArrowUp, Pencil, Plus, Search, Trash2 } from 'lucide-react';
+import { Activity, ArrowDown, ArrowUp, Pencil, Plus, Search, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
 import { useApi } from '../../contexts/AuthContext';
@@ -468,6 +468,7 @@ export default function AdminPingTasks() {
     <Flex className="admin-ping-page" direction="column" gap="4">
       <Flex className="admin-parent-title-row" justify="between" align="center" mb="3">
         <Flex align="center" gap="2">
+          <Activity size={20} />
           <Heading size="5">延迟监测</Heading>
           <Badge size="1" variant="soft" color="gray">{tasks.length} 个任务</Badge>
         </Flex>

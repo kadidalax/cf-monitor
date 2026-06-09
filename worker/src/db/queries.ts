@@ -1530,16 +1530,6 @@ export async function markExpiryNotificationSent(db: D1Database, client: string,
     .bind(time, client).run();
 }
 
-export async function listLoadNotifications(db: D1Database): Promise<any[]> {
-  const result = await db.prepare('SELECT * FROM load_notifications').all<any>();
-  return result.results.map(row => ({ ...row, clients: JSON.parse(row.clients || '[]') }));
-}
-
-export async function getLoadNotification(db: D1Database, id: number): Promise<any | null> {
-  const row = await db.prepare('SELECT * FROM load_notifications WHERE id = ?').bind(id).first<any>();
-  return row ? { ...row, clients: JSON.parse(row.clients || '[]') } : null;
-}
-
 const LOAD_NOTIFICATION_METRICS = new Set(['cpu', 'ram', 'load', 'disk', 'temp']);
 const LOAD_NOTIFICATION_UPDATE_COLUMNS: Record<string, string> = {
   name: 'name',
@@ -1550,6 +1540,27 @@ const LOAD_NOTIFICATION_UPDATE_COLUMNS: Record<string, string> = {
   interval_min: 'interval_min',
   last_notified: 'last_notified',
 };
+
+function parseLoadNotificationClients(value: unknown): string[] {
+  if (typeof value !== 'string' || !value.trim()) return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((client): client is string => typeof client === 'string');
+  } catch {
+    return [];
+  }
+}
+
+export async function listLoadNotifications(db: D1Database): Promise<any[]> {
+  const result = await db.prepare('SELECT * FROM load_notifications').all<any>();
+  return result.results.map(row => ({ ...row, clients: parseLoadNotificationClients(row.clients) }));
+}
+
+export async function getLoadNotification(db: D1Database, id: number): Promise<any | null> {
+  const row = await db.prepare('SELECT * FROM load_notifications WHERE id = ?').bind(id).first<any>();
+  return row ? { ...row, clients: parseLoadNotificationClients(row.clients) } : null;
+}
 
 function clampNumber(value: unknown, fallback: number, min: number, max: number): number {
   const numberValue = Number(value);

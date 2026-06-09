@@ -4,7 +4,7 @@ import { validatePingTaskInput } from './ping-task';
 
 export const BACKUP_SCHEMA_ID = 'cf-monitor.backup';
 export const ENCRYPTED_BACKUP_SCHEMA_ID = 'cf-monitor.encrypted-backup';
-export const BACKUP_VERSION = '1.0.0';
+export const BACKUP_VERSION = '2.0.0';
 export const BACKUP_SCOPE = 'configuration';
 export const BACKUP_SENSITIVE_WARNING = 'This backup may contain client tokens, AutoDiscovery Key, Telegram credentials, and other configuration secrets. Store it securely.';
 export const BACKUP_ENCRYPTION_ALGORITHM = 'AES-GCM';
@@ -446,7 +446,7 @@ export function validateBackup(input: unknown): BackupValidationResult {
   if (!scope) {
     warnings.push('旧备份缺少 scope 字段，已按配置备份处理');
   }
-  if (version && !version.startsWith('1.')) {
+  if (version && !version.startsWith('1.') && !version.startsWith('2.')) {
     errors.push(`version 不支持: ${version}`);
   }
 

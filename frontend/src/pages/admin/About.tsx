@@ -21,7 +21,10 @@ export default function AdminAbout() {
   return (
     <div className="admin-about-page">
       <Flex className="admin-parent-title-row" justify="between" align="center" mb="3">
-        <Heading size="5">关于</Heading>
+        <Flex align="center" gap="2">
+          <Monitor size={20} />
+          <Heading size="5">关于</Heading>
+        </Flex>
       </Flex>
 
       <Card className="admin-about-card">
@@ -36,7 +39,7 @@ export default function AdminAbout() {
           <Heading size="6">CF Monitor</Heading>
           <Text size="2" color="gray">基于 Cloudflare 的服务器监控探针</Text>
           <Flex gap="2">
-            <Badge size="2" color="blue">{version ? `v${version.version}` : 'v1.0.0'}</Badge>
+            <Badge size="2" color="blue">{version ? `v${version.version}` : 'v2.0.0'}</Badge>
             {version?.hash && <Badge size="2" variant="soft" color="gray">{version.hash.slice(0, 7)}</Badge>}
           </Flex>
         </Flex>

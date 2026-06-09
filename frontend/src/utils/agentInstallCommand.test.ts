@@ -19,8 +19,11 @@ describe('CF Monitor agent install command', () => {
 
     expect(command).toContain('/agent/install-linux.sh');
     expect(command).toContain('raw.githubusercontent.com/kadidalax/cf-monitor');
+    expect(command).toContain('id -u');
+    expect(command).toContain('sudo bash -s --');
     expect(command).toContain("'--server' 'https://worker.example.com' '--token' 'node-token'");
     expect(command).toContain("'--instance-id' 'node-token'");
+    expect(command).toContain("'--release-tag' 'v2.0.0'");
     expect(command).not.toContain("'--binary-url'");
     expect(command).not.toContain('cf-monitor-agent-linux-amd64');
     expect(command).not.toContain('komari-monitor/komari-agent');
@@ -41,6 +44,7 @@ describe('CF Monitor agent install command', () => {
     expect(command).not.toContain('cf-monitor-agent-windows-amd64.exe');
     expect(command).toContain("'-Server' 'https://worker.example.com' '-Token' 'node-token'");
     expect(command).toContain("'-InstanceId' 'node-token'");
+    expect(command).toContain("'-ReleaseTag' 'v2.0.0'");
     expect(command).not.toContain('komari-monitor/komari-agent');
   });
 
@@ -70,6 +74,7 @@ describe('CF Monitor agent install command', () => {
         ...defaultAgentInstallOptions,
         ghproxy: 'https://ghproxy.example',
         downloadProxy: '127.0.0.1:10808',
+        releaseTag: 'v1.0.2',
         dir: '/opt/cf-monitor',
         serviceName: 'cf-monitor-agent',
         mountInclude: '/,/data',
@@ -81,6 +86,7 @@ describe('CF Monitor agent install command', () => {
 
     expect(command).toContain("'--install-ghproxy' 'https://ghproxy.example'");
     expect(command).toContain("'--proxy' 'http://127.0.0.1:10808'");
+    expect(command).toContain("'--release-tag' 'v1.0.2'");
     expect(command).toContain("'--install-dir' '/opt/cf-monitor'");
     expect(command).toContain("'--service-name' 'cf-monitor-agent'");
     expect(command).toContain("'--mount-include' '/,/data'");
@@ -145,7 +151,7 @@ describe('CF Monitor agent install command', () => {
   });
 
   it('builds platform-specific project binary URLs', () => {
-    expect(cfMonitorAgentBinaryUrl('linux')).toContain('/releases/latest/download/');
+    expect(cfMonitorAgentBinaryUrl('linux')).toContain('/releases/v2.0.0/download/');
     expect(cfMonitorAgentBinaryUrl('linux')).toContain('cf-monitor-agent-linux-amd64');
     expect(cfMonitorAgentBinaryUrl('macos')).toContain('cf-monitor-agent-darwin-amd64');
     expect(cfMonitorAgentBinaryUrl('windows')).toContain('cf-monitor-agent-windows-amd64.exe');
@@ -163,6 +169,8 @@ describe('CF Monitor agent install command', () => {
     });
 
     expect(command).toContain('/agent/install-linux.sh');
+    expect(command).toContain('id -u');
+    expect(command).toContain('sudo bash -s --');
     expect(command).toContain("'--uninstall-all'");
     expect(command).toContain("'--yes'");
     expect(command).toContain("'--install-ghproxy' 'https://ghproxy.example'");

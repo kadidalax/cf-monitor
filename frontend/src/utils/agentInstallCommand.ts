@@ -5,6 +5,7 @@ export type AgentInstallPlatform = 'linux' | 'windows' | 'macos';
 export type AgentInstallOptions = {
   ghproxy: string;
   downloadProxy: string;
+  releaseTag: string;
   dir: string;
   serviceName: string;
   binaryUrl?: string;
@@ -17,6 +18,7 @@ export type AgentInstallOptions = {
 export const defaultAgentInstallOptions: AgentInstallOptions = {
   ghproxy: '',
   downloadProxy: '',
+  releaseTag: 'v2.0.0',
   dir: '',
   serviceName: '',
   binaryUrl: '',
@@ -27,7 +29,7 @@ export const defaultAgentInstallOptions: AgentInstallOptions = {
 };
 
 export const CF_MONITOR_BRANCH = 'main';
-export const CF_MONITOR_RELEASE_TAG = 'latest';
+export const CF_MONITOR_RELEASE_TAG = 'v2.0.0';
 export const CF_MONITOR_AGENT_SCRIPT_BASE = `https://raw.githubusercontent.com/${CF_MONITOR_REPOSITORY}/refs/heads/${CF_MONITOR_BRANCH}/agent`;
 export const CF_MONITOR_RELEASE_BASE = `https://github.com/${CF_MONITOR_REPOSITORY}/releases/${CF_MONITOR_RELEASE_TAG}/download`;
 
@@ -71,6 +73,11 @@ function psQuote(value: string) {
   return "'" + value.replace(/'/g, "''") + "'";
 }
 
+function rootAwareBashPipe(downloadCommand: string, args: string[]) {
+  const quotedArgs = args.map(shellQuote).join(' ');
+  return `${downloadCommand} | { if [ "$(id -u)" -eq 0 ]; then bash -s -- ${quotedArgs}; else sudo bash -s -- ${quotedArgs}; fi; }`;
+}
+
 export function buildAgentInstallCommand({
   platform,
   serverUrl,
@@ -86,6 +93,7 @@ export function buildAgentInstallCommand({
 }) {
   const ghproxy = normalizeProxyUrl(options.ghproxy);
   const downloadProxy = normalizeProxyUrl(options.downloadProxy);
+  const releaseTag = options.releaseTag.trim();
   const binaryUrl = options.binaryUrl?.trim();
   const dir = options.dir.trim();
   const serviceName = options.serviceName.trim();
@@ -102,13 +110,17 @@ export function buildAgentInstallCommand({
       if (binaryUrl) args.push('--binary-url', binaryUrl);
       if (ghproxy) args.push('--install-ghproxy', ghproxy);
       if (downloadProxy) args.push('--proxy', downloadProxy);
+      if (releaseTag) args.push('--release-tag', releaseTag);
       if (dir) args.push('--install-dir', dir);
       if (serviceName) args.push('--service-name', serviceName);
       if (mountInclude) args.push('--mount-include', mountInclude);
       if (mountExclude) args.push('--mount-exclude', mountExclude);
       if (nicInclude) args.push('--nic-include', nicInclude);
       if (nicExclude) args.push('--nic-exclude', nicExclude);
-      return `wget -qO- ${shellQuote(cfMonitorAgentScriptUrl('install-linux.sh', ghproxy))} | sudo bash -s -- ${args.map(shellQuote).join(' ')}`;
+      return rootAwareBashPipe(
+        `wget -qO- ${shellQuote(cfMonitorAgentScriptUrl('install-linux.sh', ghproxy))}`,
+        args,
+      );
     }
     case 'windows': {
       const args = ['-Server', serverUrl, '-Token', token || '<TOKEN>'];
@@ -116,6 +128,7 @@ export function buildAgentInstallCommand({
       if (binaryUrl) args.push('-BinaryUrl', binaryUrl);
       if (ghproxy) args.push('-InstallGhproxy', ghproxy);
       if (downloadProxy) args.push('-Proxy', downloadProxy);
+      if (releaseTag) args.push('-ReleaseTag', releaseTag);
       if (dir) args.push('-InstallDir', dir);
       if (serviceName) args.push('-ServiceName', serviceName);
       if (mountInclude) args.push('-MountInclude', mountInclude);
@@ -131,13 +144,17 @@ export function buildAgentInstallCommand({
       if (binaryUrl) args.push('--binary-url', binaryUrl);
       if (ghproxy) args.push('--install-ghproxy', ghproxy);
       if (downloadProxy) args.push('--proxy', downloadProxy);
+      if (releaseTag) args.push('--release-tag', releaseTag);
       if (dir) args.push('--install-dir', dir);
       if (serviceName) args.push('--service-name', serviceName);
       if (mountInclude) args.push('--mount-include', mountInclude);
       if (mountExclude) args.push('--mount-exclude', mountExclude);
       if (nicInclude) args.push('--nic-include', nicInclude);
       if (nicExclude) args.push('--nic-exclude', nicExclude);
-      return `zsh <(curl -sL ${shellQuote(cfMonitorAgentScriptUrl('install-linux.sh', ghproxy))}) ${args.map(shellQuote).join(' ')}`;
+      return rootAwareBashPipe(
+        `curl -fsSL ${shellQuote(cfMonitorAgentScriptUrl('install-linux.sh', ghproxy))}`,
+        args,
+      );
     }
     default:
       return '';
@@ -157,10 +174,16 @@ export function buildAgentUninstallAllCommand({
       return 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ' +
         `"iwr ${psQuote(cfMonitorAgentScriptUrl('install-windows.ps1', proxy))} -UseBasicParsing -OutFile 'install-windows.ps1'; & '.\\install-windows.ps1' '-UninstallAll' '-Yes'"`;
     case 'macos':
-      return `zsh <(curl -sL ${shellQuote(cfMonitorAgentScriptUrl('install-linux.sh', proxy))}) '--uninstall-all' '--yes'${proxy ? ` '--install-ghproxy' ${shellQuote(proxy)}` : ''}`;
+      return rootAwareBashPipe(
+        `curl -fsSL ${shellQuote(cfMonitorAgentScriptUrl('install-linux.sh', proxy))}`,
+        ['--uninstall-all', '--yes', ...(proxy ? ['--install-ghproxy', proxy] : [])],
+      );
     case 'linux':
     default:
-      return `wget -qO- ${shellQuote(cfMonitorAgentScriptUrl('install-linux.sh', proxy))} | sudo bash -s -- '--uninstall-all' '--yes'${proxy ? ` '--install-ghproxy' ${shellQuote(proxy)}` : ''}`;
+      return rootAwareBashPipe(
+        `wget -qO- ${shellQuote(cfMonitorAgentScriptUrl('install-linux.sh', proxy))}`,
+        ['--uninstall-all', '--yes', ...(proxy ? ['--install-ghproxy', proxy] : [])],
+      );
   }
 }
 

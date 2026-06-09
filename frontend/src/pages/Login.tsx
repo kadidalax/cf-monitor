@@ -125,7 +125,7 @@ export default function Login() {
       </Card>
 
       <Text size="1" color="gray" style={{ position: 'fixed', bottom: 16, textAlign: 'center' }}>
-        CF Monitor v1.0.0 &middot; Powered by Cloudflare Workers
+        CF Monitor v2.0.0 &middot; Powered by Cloudflare Workers
       </Text>
     </div>
   );

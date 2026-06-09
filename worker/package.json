@@ -1,6 +1,6 @@
 {
   "name": "cf-monitor",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Cloudflare Worker 探针监控系统 - 基于 komari 重构",
   "type": "module",
   "scripts": {

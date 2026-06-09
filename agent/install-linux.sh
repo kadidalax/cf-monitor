@@ -23,7 +23,8 @@ INSTALL_GHPROXY=""
 PROXY=""
 CF_MONITOR_REPOSITORY="kadidalax/cf-monitor"
 CF_MONITOR_BRANCH="main"
-CF_MONITOR_RELEASE_BASE="https://github.com/${CF_MONITOR_REPOSITORY}/releases/latest/download"
+CF_MONITOR_RELEASE_TAG="v2.0.0"
+CF_MONITOR_RELEASE_BASE="https://github.com/${CF_MONITOR_REPOSITORY}/releases/${CF_MONITOR_RELEASE_TAG}/download"
 MOUNT_INCLUDE=""
 MOUNT_EXCLUDE=""
 NIC_INCLUDE=""
@@ -52,6 +53,7 @@ Options:
                             Komari-compatible alias for --service-name.
   --binary PATH             Existing agent binary.
   --binary-url URL          Download a prebuilt agent binary from this URL.
+  --release-tag TAG         GitHub release tag used for default binary downloads, default: v2.0.0.
   --build-from-source       Build from local source or GitHub source archive. Requires Go.
   --source-url URL          Source archive used with --build-from-source.
   --proxy URL               Proxy used for --binary-url downloads, for example http://127.0.0.1:10808.
@@ -103,7 +105,7 @@ download_file() {
   local output="$2"
   if [[ "$DRY_RUN" == "1" ]]; then
     if command -v curl >/dev/null 2>&1; then
-      local curl_args=(-fL --retry 3 -o "$output")
+      local curl_args=(-fsSL --retry 3 -o "$output")
       if [[ -n "$PROXY" ]]; then
         curl_args+=(--proxy "$PROXY")
       fi
@@ -125,7 +127,7 @@ download_file() {
   fi
 
   if command -v curl >/dev/null 2>&1; then
-    local curl_args=(-fL --retry 3 -o "$output")
+    local curl_args=(-fsSL --retry 3 -o "$output")
     if [[ -n "$PROXY" ]]; then
       curl_args+=(--proxy "$PROXY")
     fi
@@ -205,6 +207,17 @@ detect_binary_filename() {
   printf 'cf-monitor-agent-%s-%s' "$os" "$arch"
 }
 
+set_release_base() {
+  if [[ -z "$CF_MONITOR_RELEASE_TAG" ]]; then
+    CF_MONITOR_RELEASE_TAG="v2.0.0"
+  fi
+  if [[ "$CF_MONITOR_RELEASE_TAG" == -* || "$CF_MONITOR_RELEASE_TAG" == *" "* ]]; then
+    echo "--release-tag cannot start with - or contain spaces." >&2
+    exit 1
+  fi
+  CF_MONITOR_RELEASE_BASE="https://github.com/${CF_MONITOR_REPOSITORY}/releases/${CF_MONITOR_RELEASE_TAG}/download"
+}
+
 default_binary_url() {
   local filename
   filename="$(detect_binary_filename)" || exit 1
@@ -280,6 +293,7 @@ while [[ $# -gt 0 ]]; do
     --source-url) SOURCE_URL="${2:-}"; shift 2 ;;
     --binary) BINARY="${2:-}"; shift 2 ;;
     --binary-url) BINARY_URL="${2:-}"; shift 2 ;;
+    --release-tag) CF_MONITOR_RELEASE_TAG="${2:-}"; shift 2 ;;
     --proxy) PROXY="${2:-}"; shift 2 ;;
     --mount-include) MOUNT_INCLUDE="${2:-}"; shift 2 ;;
     --mount-exclude) MOUNT_EXCLUDE="${2:-}"; shift 2 ;;
@@ -298,6 +312,8 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
   esac
 done
+
+set_release_base
 
 if [[ "$DRY_RUN" != "1" && "$(id -u)" -ne 0 ]]; then
   echo "Please run as root, for example: sudo ./install-linux.sh ..." >&2
@@ -374,7 +390,10 @@ if [[ -n "$BINARY" ]]; then
   WORK_BIN="$BINARY"
 else
   if [[ -z "$BINARY_URL" && "$BUILD_FROM_SOURCE" != "1" ]]; then
-    BINARY_URL="$(with_github_proxy "$(default_binary_url)")"
+    DEFAULT_BINARY_URL="$(default_binary_url)" || exit 1
+    if ! BINARY_URL="$(with_github_proxy "$DEFAULT_BINARY_URL")"; then
+      exit 1
+    fi
   fi
 fi
 

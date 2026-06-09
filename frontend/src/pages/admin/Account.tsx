@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Flex, Card, Text, Heading, Button, TextField } from '@radix-ui/themes';
-import { Save } from 'lucide-react';
+import { Save, User } from 'lucide-react';
 import { toast } from 'sonner';
 import { useApi, useAuth } from '../../contexts/AuthContext';
 
@@ -46,7 +46,10 @@ export default function AdminAccount() {
   return (
     <div className="admin-account-page">
       <Flex className="admin-parent-title-row" justify="between" align="center" mb="3">
-        <Heading size="5">账户设置</Heading>
+        <Flex align="center" gap="2">
+          <User size={20} />
+          <Heading size="5">账户设置</Heading>
+        </Flex>
       </Flex>
 
       <Card className="admin-account-card">

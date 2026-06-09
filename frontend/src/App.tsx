@@ -1,5 +1,5 @@
 import React, { Suspense, lazy } from 'react';
-import { Navigate, Routes, Route } from 'react-router-dom';
+import { Navigate, Routes, Route, useParams } from 'react-router-dom';
 import { Toaster } from 'sonner';
 import { AuthProvider } from './contexts/AuthContext';
 import { ThemeProvider } from './contexts/ThemeContext';
@@ -30,6 +30,13 @@ function LiveDataRoute({ children }: { children: React.ReactNode }) {
   return <LiveDataProvider>{children}</LiveDataProvider>;
 }
 
+function LegacySettingsNotificationRedirect() {
+  const { tab } = useParams<{ tab?: string }>();
+  const allowedTabs = new Set(['settings', 'offline', 'expiry', 'load']);
+  const targetTab = tab && allowedTabs.has(tab) ? tab : 'settings';
+  return <Navigate to={`/admin/notifications/${targetTab}`} replace />;
+}
+
 export default function App() {
   return (
     <ThemeProvider>
@@ -52,6 +59,7 @@ export default function App() {
                     <Route index element={<SettingsSite />} />
                     <Route path="site" element={<SettingsSite />} />
                     <Route path="notification" element={<Navigate to="/admin/notifications/settings" replace />} />
+                    <Route path="notification/:tab" element={<LegacySettingsNotificationRedirect />} />
                     <Route path="general" element={<SettingsGeneral />} />
                   </Route>
                   <Route path="ping" element={<AdminPingTasks />} />

@@ -31,7 +31,7 @@ export default function NotFound() {
         </Button>
       </Flex>
       <Text size="1" color="gray" mt="4">
-        CF Monitor v1.0.0
+        CF Monitor v2.0.0
       </Text>
     </Flex>
   );

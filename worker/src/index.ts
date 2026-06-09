@@ -177,7 +177,7 @@ app.get('/ping', (c) => c.text('pong'));
 
 // 版本信息
 app.get('/api/version', (c) => c.json({
-  version: '1.0.0',
+  version: '2.0.0',
   name: 'CF Monitor',
   hash: 'cf-worker',
   source_revision: SOURCE_REVISION,

@@ -68,6 +68,8 @@ function DetailItem({
   value: React.ReactNode;
   className?: string;
 }) {
+  const title = typeof value === 'string' || typeof value === 'number' ? String(value) : undefined;
+
   return (
     <div className={`DetailsGrid-item${className ? ` ${className}` : ''}`}>
       <span className="DetailsGrid-icon" aria-hidden="true">
@@ -77,7 +79,7 @@ function DetailItem({
         <Text size="1" weight="bold" className="DetailsGrid-label">
           {label}
         </Text>
-        <Text size="1" color="gray" className="DetailsGrid-value" as="div">
+        <Text size="1" color="gray" className="DetailsGrid-value" as="div" title={title}>
           {value || '-'}
         </Text>
       </span>

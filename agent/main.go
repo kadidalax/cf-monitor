@@ -31,7 +31,7 @@ import (
 	"github.com/shirou/gopsutil/v3/process"
 )
 
-const Version = "1.1.0"
+var Version = "2.0.0"
 
 const basicInfoRefreshInterval = 30 * time.Minute
 const defaultPingIntervalSec = 60

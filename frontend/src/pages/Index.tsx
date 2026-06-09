@@ -224,6 +224,7 @@ export default function Index() {
               icon={statusIconByKey[card.key]}
               oneLine={card.oneLine}
               inlineValues={card.inlineValues}
+              className={card.key === 'currentTime' || card.key === 'currentOnline' ? 'is-centered' : ''}
             />
           ))}
         </div>

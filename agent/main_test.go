@@ -266,6 +266,17 @@ func TestProtocolJSONFieldNames(t *testing.T) {
 	}
 }
 
+func TestVersionCanBeOverriddenForReleaseBuild(t *testing.T) {
+	original := Version
+	Version = "9.9.9-test"
+	t.Cleanup(func() { Version = original })
+
+	info := getBasicInfo()
+	if info.Version != "9.9.9-test" {
+		t.Fatalf("getBasicInfo version = %q, want build override", info.Version)
+	}
+}
+
 func TestApplyEnvDefaults(t *testing.T) {
 	previousToken := token
 	previousServerURL := serverURL

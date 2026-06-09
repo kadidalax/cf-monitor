@@ -2866,6 +2866,17 @@ async function main() {
     const smokeLoadRule = expectArray(loadNotificationsAfterCreate.body, 'load notifications after create')
       .find((item) => item.name === 'Smoke CPU rule');
     assert.ok(smokeLoadRule?.id, 'created load notification should be listed with an id');
+    await basicInfoD1.prepare(`
+      INSERT INTO load_notifications (name, clients, metric, threshold, ratio, interval_min)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).bind('Broken clients JSON rule', '{not-json', 'cpu', 80, 0.8, 15).run();
+    const loadNotificationsAfterBrokenClients = await request(mf, '/api/admin/notification/load', {
+      headers: authHeaders(cookie),
+    });
+    assertOk(loadNotificationsAfterBrokenClients, 'list load notifications with malformed clients JSON');
+    const brokenClientsRule = expectArray(loadNotificationsAfterBrokenClients.body, 'load notifications with malformed clients JSON')
+      .find((item) => item.name === 'Broken clients JSON rule');
+    assert.deepEqual(brokenClientsRule?.clients, [], 'malformed load notification clients JSON should degrade to an empty client list');
     const repeatedLoadNotification = await request(mf, '/api/admin/notification/load/edit', {
       method: 'POST',
       headers: authHeaders(cookie),
@@ -3072,7 +3083,7 @@ async function main() {
       headers: authHeaders(cookie),
       body: jsonBody({
         schema: 'cf-monitor.backup',
-        version: '1.0.0',
+        version: '2.0.0',
         scope: 'configuration',
         clients: [],
       }),

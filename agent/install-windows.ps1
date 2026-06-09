@@ -16,6 +16,7 @@ param(
   [switch]$BuildFromSource,
   [string]$BinaryPath = "",
   [string]$BinaryUrl = "",
+  [string]$ReleaseTag = "v2.0.0",
   [string]$Proxy = "",
   [string]$MountInclude = "",
   [string]$MountExclude = "",
@@ -86,7 +87,18 @@ function Set-InstanceDefaults {
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repository = "kadidalax/cf-monitor"
 $branch = "main"
-$releaseBase = "https://github.com/$repository/releases/latest/download"
+
+function Resolve-ReleaseBase {
+  if ([string]::IsNullOrWhiteSpace($ReleaseTag)) {
+    $script:ReleaseTag = "v2.0.0"
+  }
+  if ($ReleaseTag.StartsWith("-") -or $ReleaseTag -match "\s") {
+    throw "-ReleaseTag cannot start with - or contain spaces."
+  }
+  return "https://github.com/$repository/releases/$ReleaseTag/download"
+}
+
+$releaseBase = Resolve-ReleaseBase
 
 function ConvertTo-PowerShellLiteral {
   param([string]$Value)
