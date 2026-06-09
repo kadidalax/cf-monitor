@@ -5,6 +5,7 @@ import { Database, Gauge, HardDrive, Save, Server } from 'lucide-react';
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
 import { useApi } from '../../contexts/AuthContext';
+import { LIVE_POLL_SETTINGS_UPDATED_EVENT } from '../../contexts/livePolling';
 import { SettingCard, SettingInput, SettingToggle } from '../../components/admin/SettingCard';
 import type { SettingsLayoutOutletContext } from './SettingsLayout';
 
@@ -12,14 +13,23 @@ type SettingsMap = Record<string, string>;
 
 interface CapacityEstimate {
   clients: number;
+  gpu_clients?: number;
   capacity_daily_view_minutes?: number;
   record_persist_interval_sec?: number;
   record_high_watermark_rows?: number;
   active_monitor_records_per_day?: number;
   idle_monitor_records_per_day?: number;
   monitor_records_per_day?: number;
+  active_gpu_snapshots_per_day?: number;
+  idle_gpu_snapshots_per_day?: number;
+  gpu_snapshots_per_day?: number;
+  estimated_rows_retained?: number;
   estimated_storage_bytes?: number;
+  estimated_gpu_snapshots_retained?: number;
   ping_records_per_day: number;
+  legacy_ping_records_per_day?: number;
+  ping_records_saved_per_day?: number;
+  ping_storage_mode?: string;
   d1_reference_rows?: {
     free_warning_rows?: number;
     paid_warning_rows?: number;
@@ -29,9 +39,13 @@ interface CapacityEstimate {
   expired_row_counts?: {
     records?: number;
     gpu_records?: number;
+    gpu_snapshots?: number;
     ping_records?: number;
+    ping_snapshots?: number;
     audit_logs?: number;
   } | null;
+  row_counts_checked_at?: string;
+  row_counts_cache_seconds?: number;
   quota_reference?: {
     d1?: {
       rows_written_per_day?: {
@@ -47,7 +61,9 @@ interface CapacityEstimate {
       };
       estimated_row_bytes?: {
         monitor_record?: number;
+        gpu_snapshot?: number;
         ping_record?: number;
+        ping_snapshot?: number;
       };
       retained_rows_reference?: {
         free?: number;
@@ -81,7 +97,9 @@ const D1_FREE_DAILY_WRITES_FALLBACK = 100_000;
 const D1_PAID_DAILY_WRITES_FALLBACK = Math.floor(50_000_000 / 30);
 const D1_FREE_DATABASE_STORAGE_BYTES = 500 * 1024 * 1024;
 const ESTIMATED_MONITOR_RECORD_BYTES = 420;
+const ESTIMATED_GPU_SNAPSHOT_BYTES = 420;
 const ESTIMATED_PING_RECORD_BYTES = 160;
+const ESTIMATED_PING_SNAPSHOT_BYTES = 220;
 const WORKER_FREE_DAILY_REQUESTS = 100_000;
 const WORKER_PAID_DAILY_REQUESTS = 10_000_000;
 
@@ -123,7 +141,9 @@ function sumRowCounts(counts: CapacityEstimate['expired_row_counts']): number {
   if (!counts) return 0;
   return Number(counts.records || 0)
     + Number(counts.gpu_records || 0)
+    + Number(counts.gpu_snapshots || 0)
     + Number(counts.ping_records || 0)
+    + Number(counts.ping_snapshots || 0)
     + Number(counts.audit_logs || 0);
 }
 
@@ -189,8 +209,9 @@ export default function SettingsGeneral() {
   const [saving, setSaving] = useState(false);
   const [cleaning, setCleaning] = useState(false);
 
-  const refreshCapacity = useCallback(async () => {
-    const capacityData = await apiFetch('/admin/capacity').catch(() => null);
+  const refreshCapacity = useCallback(async (forceCounts = false) => {
+    const path = forceCounts ? '/admin/capacity?refresh_counts=true' : '/admin/capacity';
+    const capacityData = await apiFetch(path).catch(() => null);
     if (capacityData && typeof capacityData === 'object') setCapacity(capacityData as CapacityEstimate);
   }, [apiFetch]);
 
@@ -220,6 +241,8 @@ export default function SettingsGeneral() {
 
   const derived = useMemo(() => {
     const clients = Math.max(0, Number(capacity?.clients || 0));
+    const gpuClients = Math.max(0, Number(capacity?.gpu_clients || 0));
+    const gpuWritesPerDay = Math.max(0, Number(capacity?.gpu_snapshots_per_day || 0));
     const pingWritesPerDay = Math.max(0, Number(capacity?.ping_records_per_day || 0));
     const expiredBacklogRows = sumRowCounts(capacity?.expired_row_counts);
     const retentionHours = clampInteger(
@@ -277,8 +300,19 @@ export default function SettingsGeneral() {
       ? Math.ceil(clients * idleSecondsPerDay / idlePersistIntervalSec)
       : 0;
     const monitorWritesPerDay = activeMonitorWritesPerDay + idleMonitorWritesPerDay;
-    const estimatedRowsRetained = Math.ceil((monitorWritesPerDay + pingWritesPerDay) * retentionHours / 24);
+    const activeGpuWritesPerDay = recordEnabled && activeSecondsPerDay > 0
+      ? Math.ceil(gpuClients * activeSecondsPerDay / activePersistIntervalSec)
+      : 0;
+    const idleGpuWritesPerDay = recordEnabled && idleSecondsPerDay > 0
+      ? Math.ceil(gpuClients * idleSecondsPerDay / idlePersistIntervalSec)
+      : 0;
+    const fallbackGpuWritesPerDay = activeGpuWritesPerDay + idleGpuWritesPerDay;
+    const effectiveGpuWritesPerDay = gpuWritesPerDay || fallbackGpuWritesPerDay;
+    const estimatedRowsRetained = Number(capacity?.estimated_rows_retained || 0) ||
+      Math.ceil((monitorWritesPerDay + effectiveGpuWritesPerDay + pingWritesPerDay) * retentionHours / 24);
     const estimatedMonitorRowsRetained = Math.ceil(monitorWritesPerDay * retentionHours / 24);
+    const estimatedGpuRowsRetained = Number(capacity?.estimated_gpu_snapshots_retained || 0) ||
+      Math.ceil(effectiveGpuWritesPerDay * retentionHours / 24);
     const estimatedPingRowsRetained = Math.ceil(pingWritesPerDay * retentionHours / 24);
     const freeRowReference = capacity?.quota_reference?.d1?.retained_rows_reference?.free ||
       capacity?.quota_reference?.d1?.retained_rows_warning?.free ||
@@ -289,10 +323,13 @@ export default function SettingsGeneral() {
       D1_FREE_DATABASE_STORAGE_BYTES;
     const monitorRecordBytes = capacity?.quota_reference?.d1?.estimated_row_bytes?.monitor_record ||
       ESTIMATED_MONITOR_RECORD_BYTES;
-    const pingRecordBytes = capacity?.quota_reference?.d1?.estimated_row_bytes?.ping_record ||
-      ESTIMATED_PING_RECORD_BYTES;
+    const gpuSnapshotBytes = capacity?.quota_reference?.d1?.estimated_row_bytes?.gpu_snapshot ||
+      ESTIMATED_GPU_SNAPSHOT_BYTES;
+    const pingRecordBytes = capacity?.quota_reference?.d1?.estimated_row_bytes?.ping_snapshot ||
+      capacity?.quota_reference?.d1?.estimated_row_bytes?.ping_record ||
+      (capacity?.ping_storage_mode === 'snapshots' ? ESTIMATED_PING_SNAPSHOT_BYTES : ESTIMATED_PING_RECORD_BYTES);
     const estimatedStorageBytes = Number(capacity?.estimated_storage_bytes || 0) ||
-      estimatedMonitorRowsRetained * monitorRecordBytes + estimatedPingRowsRetained * pingRecordBytes;
+      estimatedMonitorRowsRetained * monitorRecordBytes + estimatedGpuRowsRetained * gpuSnapshotBytes + estimatedPingRowsRetained * pingRecordBytes;
     const d1FreeDailyWrites = capacity?.quota_reference?.d1?.rows_written_per_day?.free ||
       D1_FREE_DAILY_WRITES_FALLBACK;
     const d1PaidDailyWrites = capacity?.quota_reference?.d1?.rows_written_per_day?.paid_estimate ||
@@ -301,9 +338,13 @@ export default function SettingsGeneral() {
       WORKER_FREE_DAILY_REQUESTS;
     const workerPaidDailyRequests = capacity?.quota_reference?.workers?.requests_per_day?.paid_included ||
       WORKER_PAID_DAILY_REQUESTS;
-    const mixedDailyWrites = monitorWritesPerDay + pingWritesPerDay;
-    const activeDailyWrites = Math.ceil(clients * 86400 / activePersistIntervalSec) + pingWritesPerDay;
-    const idleDailyWrites = Math.ceil(clients * 86400 / idlePersistIntervalSec) + pingWritesPerDay;
+    const mixedDailyWrites = monitorWritesPerDay + effectiveGpuWritesPerDay + pingWritesPerDay;
+    const activeDailyWrites = Math.ceil(clients * 86400 / activePersistIntervalSec)
+      + Math.ceil(gpuClients * 86400 / activePersistIntervalSec)
+      + pingWritesPerDay;
+    const idleDailyWrites = Math.ceil(clients * 86400 / idlePersistIntervalSec)
+      + Math.ceil(gpuClients * 86400 / idlePersistIntervalSec)
+      + pingWritesPerDay;
     const activeWorkerRequestsPerDay = Math.ceil(clients * 86400 / sampleIntervalSec) + pingWritesPerDay;
     const idleWorkerRequestsPerDay = Math.ceil(clients * 86400 / idleUploadIntervalSec) + pingWritesPerDay;
     const mixedWorkerRequestsPerDay = Math.ceil(clients * activeSecondsPerDay / sampleIntervalSec)
@@ -312,6 +353,8 @@ export default function SettingsGeneral() {
 
     return {
       clients,
+      gpuClients,
+      gpuWritesPerDay: effectiveGpuWritesPerDay,
       pingWritesPerDay,
       expiredBacklogRows,
       retentionHours,
@@ -326,6 +369,8 @@ export default function SettingsGeneral() {
       monitorWritesPerDay,
       activeMonitorWritesPerDay,
       idleMonitorWritesPerDay,
+      activeGpuWritesPerDay,
+      idleGpuWritesPerDay,
       mixedDailyWrites,
       activeDailyWrites,
       idleDailyWrites,
@@ -373,6 +418,7 @@ export default function SettingsGeneral() {
       });
       if (result.success) {
         setSettings(payload);
+        window.dispatchEvent(new CustomEvent(LIVE_POLL_SETTINGS_UPDATED_EVENT, { detail: payload }));
         toast.success('设置已保存');
       } else {
         toast.error(result.error || '保存失败');
@@ -390,10 +436,10 @@ export default function SettingsGeneral() {
       const result = await apiFetch('/admin/maintenance/cleanup', { method: 'POST' });
       if (result.success) {
         const deleted = result.deleted || {};
-        const totalDeleted = ['records', 'gpu_records', 'ping_records', 'audit_logs']
+        const totalDeleted = ['records', 'gpu_records', 'gpu_snapshots', 'ping_records', 'ping_snapshots', 'audit_logs']
           .reduce((sum, key) => sum + Number(deleted[key] || 0), 0);
         toast.success(`维护清理完成，删除 ${formatInteger(totalDeleted)} 行历史数据`);
-        await refreshCapacity();
+        await refreshCapacity(true);
       } else {
         toast.error(result.error || '维护清理失败');
       }
@@ -519,7 +565,7 @@ export default function SettingsGeneral() {
         />
         <SettingInput
           label="历史高水位行数"
-          description="records、gpu_records、ping_records 接近该行数时暂停历史写入，只保留实时展示，避免 D1 被写爆"
+          description="records、gpu_records、gpu_snapshots、ping_records、ping_snapshots 接近该行数时暂停历史写入，只保留实时展示，避免 D1 被写爆"
           value={getSettingValue(settings, 'record_high_watermark_rows', String(DEFAULT_RECORD_HIGH_WATERMARK_ROWS))}
           onChange={(value) => updateSetting('record_high_watermark_rows', value)}
           type="number"

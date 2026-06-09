@@ -8,6 +8,7 @@ import { useDisplayTheme } from "../../contexts/DisplayThemeContext";
 import { CF_MONITOR_GITHUB_URL } from "../../utils/projectLinks";
 import {
   adminMenuItems,
+  isAdminChildPathActive,
   isAdminMenuPathActive,
 } from "./adminMenu";
 
@@ -156,31 +157,68 @@ export default function AdminLayout() {
             }
 
             return (
-              <Link key={item.path} to={item.path} style={{ textDecoration: "none" }}>
-                <Flex
-                  align="center"
-                  gap="3"
-                  px="3"
-                  py="2"
-                  className="admin-menu-item"
-                  style={{
-                    backgroundColor: active ? "var(--accent-4)" : "transparent",
-                    borderLeft: active ? "3px solid var(--accent-8)" : "3px solid transparent",
-                    color: active ? "var(--accent-11)" : "var(--gray-11)",
-                    transition: "all 0.15s ease",
-                    borderRadius: 8,
-                    cursor: "pointer",
-                    minHeight: 42,
-                    margin: "3px 10px",
-                  }}
-                  onClick={() => {
-                    if (window.innerWidth < 768) setSidebarOpen(false);
-                  }}
-                >
-                  {item.icon}
-                  <Text size="2">{item.label}</Text>
-                </Flex>
-              </Link>
+              <div key={item.path}>
+                <Link to={item.path} style={{ textDecoration: "none" }}>
+                  <Flex
+                    align="center"
+                    gap="3"
+                    px="3"
+                    py="2"
+                    className="admin-menu-item"
+                    style={{
+                      backgroundColor: active ? "var(--accent-4)" : "transparent",
+                      borderLeft: active ? "3px solid var(--accent-8)" : "3px solid transparent",
+                      color: active ? "var(--accent-11)" : "var(--gray-11)",
+                      transition: "all 0.15s ease",
+                      borderRadius: 8,
+                      cursor: "pointer",
+                      minHeight: 42,
+                      margin: "3px 10px",
+                    }}
+                    onClick={() => {
+                      if (window.innerWidth < 768 && !item.children?.length) setSidebarOpen(false);
+                    }}
+                  >
+                    {item.icon}
+                    <Text size="2">{item.label}</Text>
+                  </Flex>
+                </Link>
+
+                {active && item.children && item.children.length > 0 && (
+                  <div className="admin-sidebar-subnav">
+                    {item.children.map((child) => {
+                      const childActive = isAdminChildPathActive(child.path, location.pathname);
+                      return (
+                        <Link key={child.path} to={child.path} style={{ textDecoration: "none" }}>
+                          <Flex
+                            align="center"
+                            gap="2"
+                            px="3"
+                            py="2"
+                            className="admin-menu-item admin-menu-child-item"
+                            style={{
+                              backgroundColor: childActive ? "var(--accent-3)" : "transparent",
+                              color: childActive ? "var(--accent-11)" : "var(--gray-11)",
+                              borderLeft: childActive ? "2px solid var(--accent-8)" : "2px solid transparent",
+                              transition: "all 0.15s ease",
+                              borderRadius: 8,
+                              cursor: "pointer",
+                              minHeight: 34,
+                              margin: "2px 10px 2px 26px",
+                            }}
+                            onClick={() => {
+                              if (window.innerWidth < 768) setSidebarOpen(false);
+                            }}
+                          >
+                            {child.icon}
+                            <Text size="1">{child.label}</Text>
+                          </Flex>
+                        </Link>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             );
           })}
         </nav>
@@ -277,6 +315,12 @@ export default function AdminLayout() {
         }
         .admin-menu-item svg {
           flex-shrink: 0;
+        }
+        .admin-sidebar-subnav {
+          margin: -1px 0 4px;
+        }
+        .admin-menu-child-item {
+          font-size: 13px;
         }
         .admin-sidebar-footer {
           border-top: 1px solid var(--monitor-border);

@@ -8,6 +8,7 @@ frontend/dist/
 worker/dist/
 worker/.tmp/
 release/
+*.tsbuildinfo
 
 # Cloudflare local state and secrets
 worker/.wrangler/

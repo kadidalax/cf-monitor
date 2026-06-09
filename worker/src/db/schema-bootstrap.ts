@@ -1,3 +1,6 @@
+const SCHEMA_BOOTSTRAP_VERSION = '2026-06-09-client-index-prune-v1';
+const SCHEMA_BOOTSTRAP_KEY = 'schema_bootstrap_version';
+
 const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS clients (
     uuid TEXT PRIMARY KEY,
@@ -32,8 +35,6 @@ const SCHEMA_STATEMENTS = [
     created_at TEXT DEFAULT (datetime('now')),
     updated_at TEXT DEFAULT (datetime('now'))
   )`,
-  `CREATE INDEX IF NOT EXISTS idx_clients_token ON clients(token)`,
-  `CREATE INDEX IF NOT EXISTS idx_clients_group ON clients("group")`,
   `CREATE TABLE IF NOT EXISTS records (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     client TEXT NOT NULL,
@@ -72,6 +73,14 @@ const SCHEMA_STATEMENTS = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_gpu_records_client_time ON gpu_records(client, time)`,
   `CREATE INDEX IF NOT EXISTS idx_gpu_records_time ON gpu_records(time)`,
+  `CREATE TABLE IF NOT EXISTS gpu_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client TEXT NOT NULL,
+    time TEXT NOT NULL,
+    devices_json TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_gpu_snapshots_client_time ON gpu_snapshots(client, time)`,
+  `CREATE INDEX IF NOT EXISTS idx_gpu_snapshots_time ON gpu_snapshots(time)`,
   `CREATE TABLE IF NOT EXISTS users (
     uuid TEXT PRIMARY KEY,
     username TEXT NOT NULL UNIQUE,
@@ -107,9 +116,16 @@ const SCHEMA_STATEMENTS = [
     time TEXT NOT NULL,
     value INTEGER NOT NULL
   )`,
-  `CREATE INDEX IF NOT EXISTS idx_ping_records_client_time ON ping_records(client, time)`,
-  `CREATE INDEX IF NOT EXISTS idx_ping_records_task ON ping_records(task_id, time)`,
+  `CREATE INDEX IF NOT EXISTS idx_ping_records_client_task_time ON ping_records(client, task_id, time)`,
   `CREATE INDEX IF NOT EXISTS idx_ping_records_time ON ping_records(time)`,
+  `CREATE TABLE IF NOT EXISTS ping_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client TEXT NOT NULL,
+    time TEXT NOT NULL,
+    values_json TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_ping_snapshots_client_time ON ping_snapshots(client, time)`,
+  `CREATE INDEX IF NOT EXISTS idx_ping_snapshots_time ON ping_snapshots(time)`,
   `CREATE TABLE IF NOT EXISTS offline_notifications (
     client TEXT PRIMARY KEY,
     enable INTEGER DEFAULT 0,
@@ -145,6 +161,7 @@ const SCHEMA_STATEMENTS = [
   `INSERT OR IGNORE INTO settings (key, value) VALUES ('record_persist_interval_sec', '60')`,
   `INSERT OR IGNORE INTO settings (key, value) VALUES ('record_high_watermark_rows', '450000')`,
   `INSERT OR IGNORE INTO settings (key, value) VALUES ('capacity_daily_view_minutes', '60')`,
+  `INSERT OR IGNORE INTO settings (key, value) VALUES ('audit_log_preserve_time', '2160')`,
   `INSERT OR IGNORE INTO settings (key, value) VALUES ('live_poll_active_interval_sec', '3')`,
   `INSERT OR IGNORE INTO settings (key, value) VALUES ('live_poll_idle_interval_sec', '600')`,
   `INSERT OR IGNORE INTO settings (key, value) VALUES ('live_poll_active_max_duration_sec', '600')`,
@@ -168,6 +185,13 @@ const SCHEMA_STATEMENTS = [
     )`,
 ] as const;
 
+const MAINTENANCE_STATEMENTS = [
+  `DROP INDEX IF EXISTS idx_ping_records_client_time`,
+  `DROP INDEX IF EXISTS idx_ping_records_task`,
+  `DROP INDEX IF EXISTS idx_clients_token`,
+  `DROP INDEX IF EXISTS idx_clients_group`,
+] as const;
+
 const COLUMN_MIGRATIONS = [
   `ALTER TABLE ping_tasks ADD COLUMN sort_order INTEGER DEFAULT 0`,
   `UPDATE ping_tasks SET sort_order = id WHERE sort_order IS NULL OR sort_order = 0`,
@@ -189,8 +213,23 @@ async function runStatement(db: D1Database, statement: string): Promise<void> {
   await db.prepare(statement).run();
 }
 
+async function schemaVersionMatches(db: D1Database): Promise<boolean> {
+  try {
+    const row = await db.prepare('SELECT value FROM settings WHERE key = ?')
+      .bind(SCHEMA_BOOTSTRAP_KEY)
+      .first<{ value: string }>();
+    return row?.value === SCHEMA_BOOTSTRAP_VERSION;
+  } catch {
+    return false;
+  }
+}
+
 async function bootstrapSchema(db: D1Database): Promise<void> {
   for (const statement of SCHEMA_STATEMENTS) {
+    await runStatement(db, statement);
+  }
+
+  for (const statement of MAINTENANCE_STATEMENTS) {
     await runStatement(db, statement);
   }
 
@@ -204,12 +243,22 @@ async function bootstrapSchema(db: D1Database): Promise<void> {
       throw error;
     }
   }
+
+  await db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
+    .bind(SCHEMA_BOOTSTRAP_KEY, SCHEMA_BOOTSTRAP_VERSION)
+    .run();
 }
 
 export async function ensureSchema(db: D1Database): Promise<void> {
   if (schemaReady) return;
   if (!schemaPromise) {
-    schemaPromise = bootstrapSchema(db)
+    schemaPromise = (async () => {
+      if (await schemaVersionMatches(db)) {
+        schemaReady = true;
+        return;
+      }
+      await bootstrapSchema(db);
+    })()
       .then(() => {
         schemaReady = true;
       })

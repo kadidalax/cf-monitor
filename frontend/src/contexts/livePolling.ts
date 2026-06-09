@@ -1,6 +1,7 @@
 export const LIVE_POLL_INTERVAL_ACTIVE = 3000;
 export const LIVE_POLL_INTERVAL_IDLE = 10 * 60 * 1000;
 export const LIVE_POLL_ACTIVE_MAX_DURATION = 10 * 60 * 1000;
+export const LIVE_POLL_SETTINGS_UPDATED_EVENT = 'cf-monitor:live-poll-settings-updated';
 
 export interface LivePollConfig {
   activeIntervalMs: number;

@@ -20,6 +20,11 @@ const migrations = [
   '007_client_sort_order.sql',
   '008_record_high_watermark.sql',
   '009_expiry_notifications.sql',
+  '010_optimize_ping_indexes.sql',
+  '011_align_runtime_interval_settings.sql',
+  '012_ping_snapshots.sql',
+  '013_gpu_snapshots.sql',
+  '014_drop_redundant_client_indexes.sql',
 ];
 
 function wranglerArgs(extraArgs) {

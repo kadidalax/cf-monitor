@@ -34,6 +34,7 @@ import (
 const Version = "1.1.0"
 
 const basicInfoRefreshInterval = 30 * time.Minute
+const defaultPingIntervalSec = 60
 const minReportInterval = 3 * time.Second
 
 var (
@@ -136,7 +137,7 @@ func pingTaskInterval(task PingTask) time.Duration {
 		interval = pingInterval
 	}
 	if interval < 1 {
-		interval = 30
+		interval = defaultPingIntervalSec
 	}
 	return time.Duration(interval) * time.Second
 }
@@ -213,7 +214,7 @@ func init() {
 	flag.StringVar(&clientName, "name", "", "Optional node name override")
 	flag.StringVar(&reportMode, "mode", "websocket", "Report mode: websocket or http")
 	flag.IntVar(&reconnectInterval, "reconnect-interval", 5, "WebSocket reconnect interval in seconds")
-	flag.IntVar(&pingInterval, "ping-interval", 30, "Ping task poll interval in seconds")
+	flag.IntVar(&pingInterval, "ping-interval", defaultPingIntervalSec, "Ping task poll interval in seconds")
 	flag.StringVar(&mountInclude, "mount-include", "", "Comma-separated mountpoint/device patterns to include in disk totals, for example /,/data,/dev/sd*")
 	flag.StringVar(&mountExclude, "mount-exclude", "", "Comma-separated mountpoint/device patterns to exclude from disk totals, for example /boot,tmpfs,/run")
 	flag.StringVar(&nicInclude, "nic-include", "", "Comma-separated network interface patterns to include in traffic totals, for example eth*,ens*")
@@ -231,7 +232,7 @@ func main() {
 		reconnectInterval = 1
 	}
 	if pingInterval < 1 {
-		pingInterval = 30
+		pingInterval = defaultPingIntervalSec
 	}
 
 	normalizedServer, err := normalizeServerURL(serverURL)
@@ -518,17 +519,17 @@ func detectAMDGPU() ([]string, []GPUInfo) {
 func runPingPoller() {
 	scheduler := newPingTaskScheduler()
 	for {
-		executePingTasks(scheduler, time.Now())
-		time.Sleep(time.Duration(pingInterval) * time.Second)
+		tasks := executePingTasks(scheduler, time.Now())
+		time.Sleep(pingPollDelay(tasks, pingInterval))
 	}
 }
 
-func executePingTasks(scheduler *pingTaskScheduler, now time.Time) {
+func executePingTasks(scheduler *pingTaskScheduler, now time.Time) []PingTask {
 	endpoint := serverURL + "/api/clients/ping/tasks"
 	req, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
 		log.Printf("ping tasks request error: %v", err)
-		return
+		return nil
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
@@ -536,34 +537,34 @@ func executePingTasks(scheduler *pingTaskScheduler, now time.Time) {
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("ping tasks fetch failed: %v", err)
-		return
+		return nil
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
 		log.Printf("ping tasks HTTP %d", resp.StatusCode)
-		return
+		return nil
 	}
 
 	var tasks []PingTask
 	if err := json.NewDecoder(resp.Body).Decode(&tasks); err != nil {
 		log.Printf("ping tasks parse error: %v", err)
-		return
+		return nil
 	}
 
 	if len(tasks) == 0 {
-		return
+		return tasks
 	}
 
-	tasks = scheduler.dueTasks(tasks, now)
-	if len(tasks) == 0 {
-		return
+	dueTasks := scheduler.dueTasks(tasks, now)
+	if len(dueTasks) == 0 {
+		return tasks
 	}
 
-	log.Printf("executing %d ping task(s)", len(tasks))
+	log.Printf("executing %d ping task(s)", len(dueTasks))
 	var results []PingResult
 
-	for _, task := range tasks {
+	for _, task := range dueTasks {
 		var value float64
 
 		switch strings.ToLower(task.Type) {
@@ -586,6 +587,27 @@ func executePingTasks(scheduler *pingTaskScheduler, now time.Time) {
 	if len(results) > 0 {
 		reportPingResults(results)
 	}
+	return tasks
+}
+
+func pingPollDelay(tasks []PingTask, configuredIntervalSec int) time.Duration {
+	intervalSec := configuredIntervalSec
+	if intervalSec < 1 {
+		intervalSec = defaultPingIntervalSec
+	}
+	for _, task := range tasks {
+		taskInterval := task.IntervalSec
+		if taskInterval < 1 {
+			taskInterval = intervalSec
+		}
+		if taskInterval > 0 && taskInterval < intervalSec {
+			intervalSec = taskInterval
+		}
+	}
+	if intervalSec < 1 {
+		intervalSec = defaultPingIntervalSec
+	}
+	return time.Duration(intervalSec) * time.Second
 }
 
 func executeICMPPing(target string) float64 {

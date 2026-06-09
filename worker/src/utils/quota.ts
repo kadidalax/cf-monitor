@@ -8,6 +8,8 @@ export const D1_PAID_DATABASE_STORAGE_BYTES = 10 * 1024 * 1024 * 1024;
 export const D1_ACCOUNT_FREE_STORAGE_BYTES = 5 * 1024 * 1024 * 1024;
 export const ESTIMATED_MONITOR_RECORD_BYTES = 420;
 export const ESTIMATED_PING_RECORD_BYTES = 160;
+export const ESTIMATED_PING_SNAPSHOT_BYTES = 220;
+export const ESTIMATED_GPU_SNAPSHOT_BYTES = 420;
 export const D1_FREE_RETAINED_ROWS_REFERENCE = 500_000;
 export const D1_PAID_RETAINED_ROWS_REFERENCE = 10_000_000;
 
@@ -27,7 +29,9 @@ export function buildQuotaReference() {
       },
       estimated_row_bytes: {
         monitor_record: ESTIMATED_MONITOR_RECORD_BYTES,
+        gpu_snapshot: ESTIMATED_GPU_SNAPSHOT_BYTES,
         ping_record: ESTIMATED_PING_RECORD_BYTES,
+        ping_snapshot: ESTIMATED_PING_SNAPSHOT_BYTES,
       },
       retained_rows_reference: {
         free: D1_FREE_RETAINED_ROWS_REFERENCE,

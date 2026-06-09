@@ -6,7 +6,7 @@ param(
 
   [string]$Name = $env:COMPUTERNAME,
   [int]$Interval = 3,
-  [int]$PingInterval = 30,
+  [int]$PingInterval = 60,
   [ValidateSet("websocket", "http")]
   [string]$Mode = "websocket",
   [string]$InstanceId = "",

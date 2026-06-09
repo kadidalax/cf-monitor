@@ -6,6 +6,7 @@
 import { Hono } from 'hono';
 import type { Bindings, Variables } from '../index';
 import * as db from '../db/queries';
+import { buildAdminSettings } from '../settings/schema';
 import { normalizeMonitorReport } from '../utils/monitor-report';
 import { validatePingResults } from '../utils/ping-result';
 import { escapeTelegramHtml } from '../utils/telegram';
@@ -14,6 +15,111 @@ import { bestEffortRecordHealthEvent, errorDetail } from '../utils/observability
 const clientRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 const HTTP_LIVE_TTL_FALLBACK_MS = 180_000;
 const HTTP_LIVE_TTL_MAX_MS = 24 * 60 * 60 * 1000;
+const AGENT_AUTH_CACHE_MS = 15_000;
+const AGENT_AUTH_NEGATIVE_CACHE_MS = 5_000;
+const AGENT_AUTH_CACHE_MAX_ENTRIES = 512;
+const AGENT_PING_TASK_CACHE_MS = 30_000;
+const IP_CHANGE_NOTIFICATION_SETTING_KEYS = [
+  'enable_ip_change_notification',
+  'telegram_bot_token',
+  'telegram_chat_id',
+];
+const AGENT_POLICY_SETTING_KEYS = [
+  'live_poll_active_interval_sec',
+  'live_poll_idle_interval_sec',
+  'live_poll_active_max_duration_sec',
+];
+
+type AgentAuthCacheEntry<T> = { value: T | null; expiresAt: number };
+
+let agentAuthCache = new Map<string, AgentAuthCacheEntry<db.Client>>();
+let agentIdentityAuthCache = new Map<string, AgentAuthCacheEntry<db.ClientIdentity>>();
+let agentPingTasksCache: { value: db.PingTask[]; expiresAt: number } | null = null;
+
+export function invalidateAgentClientAuthCache(client?: { uuid?: string; token?: string }): void {
+  if (!client) {
+    agentAuthCache.clear();
+    agentIdentityAuthCache.clear();
+    return;
+  }
+  for (const [token, entry] of agentAuthCache) {
+    if (token === client.token || entry.value?.uuid === client.uuid) {
+      agentAuthCache.delete(token);
+    }
+  }
+  for (const [token, entry] of agentIdentityAuthCache) {
+    if (token === client.token || entry.value?.uuid === client.uuid) {
+      agentIdentityAuthCache.delete(token);
+    }
+  }
+}
+
+export function invalidateAgentPingTaskCache(): void {
+  agentPingTasksCache = null;
+}
+
+function setAgentAuthCache<T>(
+  cache: Map<string, AgentAuthCacheEntry<T>>,
+  token: string,
+  value: T | null,
+  ttlMs: number,
+  now: number,
+): void {
+  if (cache.size >= AGENT_AUTH_CACHE_MAX_ENTRIES) {
+    const firstKey = cache.keys().next().value;
+    if (typeof firstKey === 'string') cache.delete(firstKey);
+  }
+  cache.set(token, {
+    value,
+    expiresAt: now + ttlMs,
+  });
+}
+
+export async function getAgentClientByToken(database: D1Database, token: string): Promise<db.Client | null> {
+  const now = Date.now();
+  const cached = agentAuthCache.get(token);
+  if (cached && cached.expiresAt > now) {
+    return cached.value;
+  }
+
+  const client = await db.getClientByToken(database, token);
+  if (client) {
+    setAgentAuthCache(agentAuthCache, token, client, AGENT_AUTH_CACHE_MS, now);
+  } else {
+    setAgentAuthCache(agentAuthCache, token, null, AGENT_AUTH_NEGATIVE_CACHE_MS, now);
+  }
+  return client;
+}
+
+export async function getAgentClientIdentityByToken(database: D1Database, token: string): Promise<db.ClientIdentity | null> {
+  const now = Date.now();
+  const cached = agentIdentityAuthCache.get(token);
+  if (cached && cached.expiresAt > now) {
+    return cached.value;
+  }
+
+  const client = await db.getClientIdentityByToken(database, token);
+  if (client) {
+    setAgentAuthCache(agentIdentityAuthCache, token, client, AGENT_AUTH_CACHE_MS, now);
+  } else {
+    setAgentAuthCache(agentIdentityAuthCache, token, null, AGENT_AUTH_NEGATIVE_CACHE_MS, now);
+  }
+  return client;
+}
+
+async function listAgentPingTasks(database: D1Database): Promise<db.PingTask[]> {
+  const now = Date.now();
+  if (agentPingTasksCache && agentPingTasksCache.expiresAt > now) {
+    return agentPingTasksCache.value;
+  }
+
+  const tasks = await db.listPingTasks(database);
+  agentPingTasksCache = {
+    value: tasks,
+    expiresAt: now + AGENT_PING_TASK_CACHE_MS,
+  };
+  return tasks;
+}
 
 function nonEmptyString(value: unknown, fallback = ''): string {
   return typeof value === 'string' && value.trim() !== '' ? value.trim() : fallback;
@@ -21,6 +127,22 @@ function nonEmptyString(value: unknown, fallback = ''): string {
 
 function positiveNumber(value: unknown, fallback = 0): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function clientFieldChanged(current: unknown, next: unknown): boolean {
+  if (typeof next === 'number') return Number(current || 0) !== next;
+  return String(current ?? '') !== String(next ?? '');
+}
+
+function buildChangedClientPatch(client: db.Client | null | undefined, nextValues: Partial<db.Client>): Partial<db.Client> {
+  const patch: Partial<db.Client> = {};
+  for (const [key, value] of Object.entries(nextValues)) {
+    const typedKey = key as keyof db.Client;
+    if (clientFieldChanged(client?.[typedKey], value)) {
+      (patch as Record<string, unknown>)[key] = value;
+    }
+  }
+  return patch;
 }
 
 function requestClientIp(c: any): string {
@@ -67,7 +189,7 @@ function ipChangeParts(oldIpv4: string, oldIpv6: string, newIpv4: string, newIpv
 async function recordIpChangeIfEnabled(c: any, clientName: string, parts: string[]): Promise<void> {
   if (parts.length === 0) return;
 
-  const settings = await db.getAllSettings(c.env.DB);
+  const settings = await db.getSettingsByKeys(c.env.DB, IP_CHANGE_NOTIFICATION_SETTING_KEYS);
   if (settings['enable_ip_change_notification'] !== 'true') return;
 
   const message = `CF Monitor IP 变更通知\n节点: ${clientName}\n${parts.join('\n')}`;
@@ -92,8 +214,8 @@ async function syncClientIpsFromReport(
   uuid: string,
   clientName: string,
   report: Record<string, any>,
+  oldClient: db.Client | null,
 ): Promise<void> {
-  const oldClient = await db.getClient(c.env.DB, uuid);
   if (!oldClient) return;
 
   const fallbackIp = requestClientIp(c);
@@ -108,6 +230,7 @@ async function syncClientIpsFromReport(
   if (Object.keys(updates).length === 0) return;
 
   await db.updateClient(c.env.DB, uuid, updates as any);
+  invalidateAgentClientAuthCache({ uuid, token: oldClient.token });
   const parts = ipChangeParts(oldClient.ipv4 || '', oldClient.ipv6 || '', nextIpv4 || oldClient.ipv4 || '', nextIpv6 || oldClient.ipv6 || '');
   await recordIpChangeIfEnabled(c, clientName, parts);
 }
@@ -145,6 +268,23 @@ async function updateLiveReport(
   }
 }
 
+async function fallbackAgentPolicy(database: D1Database) {
+  const settings = buildAdminSettings(await db.getSettingsByKeys(database, AGENT_POLICY_SETTING_KEYS));
+  const sampleIntervalSec = Math.min(Math.max(Number(settings.live_poll_active_interval_sec || 3), 3), 300);
+  const reportIntervalSec = Math.min(Math.max(Number(settings.live_poll_idle_interval_sec || 600), 60), 3600);
+  const viewerTtlSec = Math.min(Math.max(Number(settings.live_poll_active_max_duration_sec || 600), 60), 3600);
+  return {
+    type: 'policy',
+    mode: 'idle',
+    sample_interval_sec: Math.floor(sampleIntervalSec),
+    report_interval_sec: Math.floor(reportIntervalSec),
+    report_now: false,
+    viewer_count: 0,
+    viewer_ttl_sec: Math.floor(viewerTtlSec),
+    timestamp: Date.now(),
+  };
+}
+
 function bearerToken(c: any): string {
   const authHeader = c.req.header('Authorization') || '';
   return authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
@@ -158,7 +298,26 @@ async function clientAuth(c: any, next: any) {
     return c.json({ error: '缺少认证 Token' }, 401);
   }
 
-  const client = await db.getClientByToken(c.env.DB, token);
+  const client = await getAgentClientByToken(c.env.DB, token);
+  if (!client) {
+    return c.json({ error: '无效的 Token' }, 401);
+  }
+
+  c.set('clientUuid', client.uuid);
+  c.set('clientName', client.name);
+  c.set('clientHidden', Boolean(client.hidden));
+  c.set('clientRecord', client);
+  await next();
+}
+
+async function clientIdentityAuth(c: any, next: any) {
+  const token = bearerToken(c).trim();
+
+  if (!token) {
+    return c.json({ error: '缺少认证 Token' }, 401);
+  }
+
+  const client = await getAgentClientIdentityByToken(c.env.DB, token);
   if (!client) {
     return c.json({ error: '无效的 Token' }, 401);
   }
@@ -175,7 +334,7 @@ clientRoutes.post('/register', async (c) => {
 });
 
 // 获取 Agent 动态上报策略（HTTP 模式使用）
-clientRoutes.get('/policy', clientAuth, async (c) => {
+clientRoutes.get('/policy', clientIdentityAuth, async (c) => {
   try {
     const doId = c.env.LIVE_DATA.idFromName('global');
     const stub = c.env.LIVE_DATA.get(doId);
@@ -185,16 +344,20 @@ clientRoutes.get('/policy', clientAuth, async (c) => {
     }
     return c.json(await response.json());
   } catch {
-    return c.json({
-      type: 'policy',
-      mode: 'idle',
-      sample_interval_sec: 3,
-      report_interval_sec: 600,
-      report_now: false,
-      viewer_count: 0,
-      viewer_ttl_sec: 600,
-      timestamp: Date.now(),
-    });
+    try {
+      return c.json(await fallbackAgentPolicy(c.env.DB));
+    } catch {
+      return c.json({
+        type: 'policy',
+        mode: 'idle',
+        sample_interval_sec: 3,
+        report_interval_sec: 600,
+        report_now: false,
+        viewer_count: 0,
+        viewer_ttl_sec: 600,
+        timestamp: Date.now(),
+      });
+    }
   }
 });
 
@@ -203,9 +366,10 @@ clientRoutes.post('/uploadBasicInfo', clientAuth, async (c) => {
   try {
     const body = await c.req.json();
     const uuid = c.get('clientUuid')!;
+    const authClient = c.get('clientRecord') as db.Client | undefined;
 
     // Fetch old client info for IP change detection
-    const oldClient = await db.getClient(c.env.DB, uuid);
+    const oldClient = authClient || await db.getClient(c.env.DB, uuid);
     const oldIpv4 = oldClient?.ipv4 || '';
     const oldIpv6 = oldClient?.ipv6 || '';
     const fallbackIp = requestClientIp(c);
@@ -215,7 +379,7 @@ clientRoutes.post('/uploadBasicInfo', clientAuth, async (c) => {
     const inferredIpv6 = !newIpv6 && fallbackIp && isIPv6(fallbackIp) ? fallbackIp : newIpv6;
     const displayName = oldClient?.name || c.get('clientName') || uuid;
 
-    await db.updateClient(c.env.DB, uuid, {
+    const patch = buildChangedClientPatch(oldClient, {
       cpu_name: nonEmptyString(body.cpu_name, oldClient?.cpu_name || ''),
       virtualization: nonEmptyString(body.virtualization, oldClient?.virtualization || ''),
       arch: nonEmptyString(body.arch, oldClient?.arch || ''),
@@ -231,6 +395,10 @@ clientRoutes.post('/uploadBasicInfo', clientAuth, async (c) => {
       disk_total: positiveNumber(body.disk_total, oldClient?.disk_total || 0),
       version: nonEmptyString(body.version, oldClient?.version || ''),
     });
+    if (Object.keys(patch).length > 0) {
+      await db.updateClient(c.env.DB, uuid, patch);
+      invalidateAgentClientAuthCache({ uuid, token: oldClient?.token });
+    }
 
     await recordIpChangeIfEnabled(
       c,
@@ -255,16 +423,18 @@ clientRoutes.post('/report', clientAuth, async (c) => {
     const report = reports[reports.length - 1];
     const liveName = nonEmptyString(report.name, c.get('clientName') || uuid);
     const hidden = Boolean(c.get('clientHidden'));
+    const authClient = c.get('clientRecord') as db.Client | undefined;
 
-    await syncClientIpsFromReport(c, uuid, liveName, report);
+    await syncClientIpsFromReport(c, uuid, liveName, report, authClient || null);
 
     const persisted = await updateLiveReport(c, uuid, liveName, hidden, reports.length > 1 ? reports : report, nowMs);
     if (persisted) {
       // 版本信息不需要每次上报写入 D1，跟随历史采样刷新即可。
-      if (report.version) {
+      if (report.version && clientFieldChanged(authClient?.version, report.version)) {
         await db.updateClient(c.env.DB, uuid, {
           version: report.version,
         });
+        invalidateAgentClientAuthCache({ uuid, token: authClient?.token });
       }
     }
 
@@ -275,10 +445,10 @@ clientRoutes.post('/report', clientAuth, async (c) => {
 });
 
 // 获取 Ping 任务列表（受保护）
-clientRoutes.get('/ping/tasks', clientAuth, async (c) => {
+clientRoutes.get('/ping/tasks', clientIdentityAuth, async (c) => {
   try {
     const uuid = c.get('clientUuid')!;
-    const allTasks = await db.listPingTasks(c.env.DB);
+    const allTasks = await listAgentPingTasks(c.env.DB);
 
     // 筛选适用于此客户端的任务
     const tasks = allTasks.filter(task => {
@@ -293,18 +463,18 @@ clientRoutes.get('/ping/tasks', clientAuth, async (c) => {
 });
 
 // 上报 Ping 结果（受保护）
-clientRoutes.post('/ping/result', clientAuth, async (c) => {
+clientRoutes.post('/ping/result', clientIdentityAuth, async (c) => {
   try {
     const body = await c.req.json();
     const uuid = c.get('clientUuid')!;
-    const now = new Date().toISOString();
 
     // body 应该是 { task_id, value } 或包含多个结果的数组
-    const tasks = await db.listPingTasks(c.env.DB);
+    const tasks = await listAgentPingTasks(c.env.DB);
     const validated = validatePingResults(body, tasks, uuid);
     if (!validated.ok) {
       return c.json({ error: validated.error }, validated.status as 400 | 403);
     }
+    const taskMap = new Map(tasks.map(task => [task.id, task]));
 
     const doId = c.env.LIVE_DATA.idFromName('global');
     const stub = c.env.LIVE_DATA.get(doId);
@@ -316,6 +486,7 @@ clientRoutes.post('/ping/result', clientAuth, async (c) => {
         results: validated.results.map(result => ({
           task_id: result.taskId,
           value: result.value,
+          interval_sec: taskMap.get(result.taskId)?.interval_sec || 60,
         })),
         timestamp: Date.now(),
       }),
@@ -325,13 +496,6 @@ clientRoutes.post('/ping/result', clientAuth, async (c) => {
     }
     const doResult = await doResponse.json().catch(() => null) as { accepted?: unknown } | null;
     const accepted = Number(doResult?.accepted || 0);
-    await bestEffortRecordHealthEvent(
-      c.env.DB,
-      'ping_persistence',
-      'ok',
-      `ping result persisted for ${uuid}`,
-    );
-
     return c.json({ success: true, accepted });
   } catch (error) {
     await bestEffortRecordHealthEvent(
@@ -345,4 +509,4 @@ clientRoutes.post('/ping/result', clientAuth, async (c) => {
   }
 });
 
-export { clientRoutes, clientAuth };
+export { clientRoutes, clientAuth, clientIdentityAuth };

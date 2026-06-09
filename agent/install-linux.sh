@@ -5,7 +5,7 @@ SERVER=""
 TOKEN=""
 NODE_NAME="$(hostname)"
 INTERVAL="3"
-PING_INTERVAL="30"
+PING_INTERVAL="60"
 MODE="websocket"
 INSTALL_DIR=""
 SERVICE_NAME=""
@@ -43,7 +43,7 @@ Options:
   --token TOKEN             Agent token from admin panel. Required.
   --name NAME               Node name, default: hostname.
   --interval SECONDS        Report interval, default: 3.
-  --ping-interval SECONDS   Ping task poll interval, default: 30.
+  --ping-interval SECONDS   Ping task poll interval, default: 60.
   --mode MODE               websocket or http, default: websocket.
   --instance-id ID          Instance id used for default service and install directory.
   --install-dir DIR         Install directory, default: /opt/cf-monitor/<instance-id>.

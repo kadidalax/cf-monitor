@@ -8,6 +8,7 @@ import {
   getLivePollDelay,
   getFallbackViewerExpiry,
   isViewerWindowExpired,
+  LIVE_POLL_SETTINGS_UPDATED_EVENT,
   normalizeLivePollConfig,
   shouldReconnectLiveWebSocket,
   type LivePollConfig,
@@ -235,22 +236,46 @@ export function LiveDataProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let cancelled = false;
 
-    fetch('/api/public')
-      .then(async (res) => {
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
-      })
-      .then((settings) => {
-        if (!cancelled) {
-          pollConfigRef.current = normalizeLivePollConfig(settings);
-        }
-      })
-      .catch(() => {
-        pollConfigRef.current = DEFAULT_LIVE_POLL_CONFIG;
-      });
+    const applySettings = (settings: Record<string, unknown> | null | undefined) => {
+      pollConfigRef.current = normalizeLivePollConfig(settings);
+      fallbackExpiresAtRef.current = null;
+    };
+
+    const loadSettings = () => {
+      fetch('/api/public')
+        .then(async (res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return res.json();
+        })
+        .then((settings) => {
+          if (!cancelled) {
+            applySettings(settings);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            pollConfigRef.current = DEFAULT_LIVE_POLL_CONFIG;
+            fallbackExpiresAtRef.current = null;
+          }
+        });
+    };
+
+    const handleSettingsUpdated = (event: Event) => {
+      if (cancelled) return;
+      const detail = event instanceof CustomEvent ? event.detail : null;
+      if (detail && typeof detail === 'object') {
+        applySettings(detail as Record<string, unknown>);
+      } else {
+        loadSettings();
+      }
+    };
+
+    loadSettings();
+    window.addEventListener(LIVE_POLL_SETTINGS_UPDATED_EVENT, handleSettingsUpdated);
 
     return () => {
       cancelled = true;
+      window.removeEventListener(LIVE_POLL_SETTINGS_UPDATED_EVENT, handleSettingsUpdated);
     };
   }, []);
 

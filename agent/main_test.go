@@ -451,8 +451,34 @@ func TestPingTaskIntervalFallbacks(t *testing.T) {
 	}
 
 	pingInterval = 0
-	if got := pingTaskInterval(PingTask{IntervalSec: 0}); got != 30*time.Second {
-		t.Fatalf("pingTaskInterval(default fallback) = %s, want 30s", got)
+	if got := pingTaskInterval(PingTask{IntervalSec: 0}); got != 60*time.Second {
+		t.Fatalf("pingTaskInterval(default fallback) = %s, want 60s", got)
+	}
+}
+
+func TestPingPollDelayFollowsShortestReturnedTaskInterval(t *testing.T) {
+	if got := pingPollDelay(nil, 0); got != 60*time.Second {
+		t.Fatalf("pingPollDelay(empty fallback) = %s, want 60s", got)
+	}
+
+	if got := pingPollDelay([]PingTask{
+		{ID: 1, IntervalSec: 60},
+		{ID: 2, IntervalSec: 120},
+	}, 60); got != 60*time.Second {
+		t.Fatalf("pingPollDelay(default tasks) = %s, want 60s", got)
+	}
+
+	if got := pingPollDelay([]PingTask{
+		{ID: 1, IntervalSec: 60},
+		{ID: 2, IntervalSec: 10},
+	}, 60); got != 10*time.Second {
+		t.Fatalf("pingPollDelay(short task) = %s, want 10s", got)
+	}
+
+	if got := pingPollDelay([]PingTask{
+		{ID: 1, IntervalSec: 120},
+	}, 45); got != 45*time.Second {
+		t.Fatalf("pingPollDelay(configured cap) = %s, want 45s", got)
 	}
 }
 

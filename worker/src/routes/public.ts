@@ -9,7 +9,7 @@ import { AdminBootstrapError, ensureInitialAdmin } from '../auth/admin-bootstrap
 import { AuthConfigurationError, generateToken, verifyAdminToken } from '../auth/jwt';
 import { hashPassword, needsPasswordRehash, verifyPassword } from '../auth/password';
 import { clearAdminSessionCookie, ensureAdminCsrfCookie, getAdminSessionToken, setAdminSessionCookie } from '../auth/session';
-import { buildPublicSettings } from '../settings/schema';
+import { PUBLIC_SETTING_KEYS, buildPublicSettings } from '../settings/schema';
 
 const publicRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
@@ -17,6 +17,9 @@ const LOGIN_RATE_LIMIT_MAX_FAILURES = 5;
 const LOGIN_RATE_LIMIT_BASE_LOCK_MS = 30 * 1000;
 const LOGIN_RATE_LIMIT_MAX_LOCK_MS = 15 * 60 * 1000;
 const LOGIN_RATE_LIMIT_CLEANUP_AGE_MS = 24 * 60 * 60 * 1000;
+const LOGIN_RATE_LIMIT_CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
+const LOGIN_FAILURE_AUDIT_THROTTLE_MS = 60 * 1000;
+const LOGIN_FAILURE_AUDIT_THROTTLE_MAX_ENTRIES = 512;
 const MAX_LOGIN_USERNAME_LENGTH = 128;
 const MAX_LOGIN_PASSWORD_LENGTH = 4096;
 const MAX_PUBLIC_RECORD_RANGE_MS = 3 * 24 * 60 * 60 * 1000;
@@ -28,6 +31,9 @@ const PUBLIC_LIVE_RATE_LIMIT_MAX = 180;
 const PUBLIC_METADATA_CACHE_SECONDS = 30;
 const PUBLIC_HISTORY_CACHE_SECONDS = 10;
 const PUBLIC_LIVE_CACHE_SECONDS = 2;
+const PUBLIC_METADATA_CACHE_MS = PUBLIC_METADATA_CACHE_SECONDS * 1000;
+const PUBLIC_HISTORY_CACHE_MS = PUBLIC_HISTORY_CACHE_SECONDS * 1000;
+const PUBLIC_HISTORY_CACHE_MAX_ENTRIES = 256;
 
 type PublicRateLimitBucket = {
   count: number;
@@ -37,6 +43,64 @@ type PublicRateLimitBucket = {
 
 const publicRateLimitBuckets = new Map<string, PublicRateLimitBucket>();
 let publicRateLimitSweepCounter = 0;
+
+type PublicClientsSnapshot = {
+  clients: any[];
+  nodes: any[];
+  publicClientIds: Set<string>;
+  expiresAt: number;
+};
+
+let publicSettingsCache: { value: Record<string, any>; expiresAt: number } | null = null;
+let publicClientsSnapshotCache: PublicClientsSnapshot | null = null;
+let publicPingTasksCache: { value: db.PingTask[]; expiresAt: number } | null = null;
+const publicHistoryCache = new Map<string, { value: unknown; expiresAt: number }>();
+const publicClientVisibilityCache = new Map<string, { value: boolean; expiresAt: number }>();
+let lastLoginRateLimitCleanupAt = 0;
+const loginFailureAuditThrottle = new Map<string, { expiresAt: number }>();
+
+function cacheIsFresh(entry: { expiresAt: number } | null | undefined, now = Date.now()): boolean {
+  return Boolean(entry && entry.expiresAt > now);
+}
+
+export function invalidatePublicMetadataCache(): void {
+  publicSettingsCache = null;
+  publicClientsSnapshotCache = null;
+  publicPingTasksCache = null;
+  publicHistoryCache.clear();
+  publicClientVisibilityCache.clear();
+}
+
+function publicHistoryCacheKey(c: any, bucket: string): string {
+  const url = new URL(c.req.url);
+  url.searchParams.sort();
+  return `${bucket}:${url.pathname}?${url.searchParams.toString()}`;
+}
+
+function getPublicHistoryCache(c: any, key: string): Response | null {
+  const entry = publicHistoryCache.get(key);
+  if (!cacheIsFresh(entry)) {
+    if (entry) publicHistoryCache.delete(key);
+    return null;
+  }
+  setPublicCache(c, PUBLIC_HISTORY_CACHE_SECONDS);
+  c.header('X-CF-Monitor-History-Cache', 'hit');
+  return c.json(entry!.value);
+}
+
+function setPublicHistoryCache(c: any, key: string, value: unknown): Response {
+  if (publicHistoryCache.size >= PUBLIC_HISTORY_CACHE_MAX_ENTRIES) {
+    const oldestKey = publicHistoryCache.keys().next().value;
+    if (oldestKey) publicHistoryCache.delete(oldestKey);
+  }
+  publicHistoryCache.set(key, {
+    value,
+    expiresAt: Date.now() + PUBLIC_HISTORY_CACHE_MS,
+  });
+  setPublicCache(c, PUBLIC_HISTORY_CACHE_SECONDS);
+  c.header('X-CF-Monitor-History-Cache', 'miss');
+  return c.json(value);
+}
 
 function cleanupPublicRateLimitBuckets(nowMs: number): void {
   for (const [key, bucket] of publicRateLimitBuckets) {
@@ -50,6 +114,35 @@ function readIntParam(value: string | undefined, fallback: number, max: number):
   const parsed = Number.parseInt(value || '', 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return Math.min(parsed, max);
+}
+
+function readIntListParam(value: string | undefined, maxItems: number): number[] {
+  if (!value) return [];
+  return [...new Set(
+    value
+      .split(',')
+      .map((item) => Number.parseInt(item.trim(), 10))
+      .filter((item) => Number.isInteger(item) && item > 0),
+  )].slice(0, maxItems);
+}
+
+function readPingTaskHistorySpecs(value: string | undefined, maxItems: number): db.PingTaskHistoryRequest[] {
+  if (!value) return [];
+  const specs: db.PingTaskHistoryRequest[] = [];
+  const seen = new Set<number>();
+  for (const rawSpec of value.split(',')) {
+    const [rawTaskId, rawLimit, rawInterval] = rawSpec.split(':');
+    const taskId = Number.parseInt(rawTaskId || '', 10);
+    if (!Number.isInteger(taskId) || taskId <= 0 || seen.has(taskId)) continue;
+    seen.add(taskId);
+    specs.push({
+      taskId,
+      limit: readIntParam(rawLimit, 120, 360),
+      intervalSec: readIntParam(rawInterval, 60, 86_400),
+    });
+    if (specs.length >= maxItems) break;
+  }
+  return specs;
 }
 
 function wantsPagedResponse(c: any): boolean {
@@ -81,9 +174,63 @@ function validatePublicTimeRange(start: string, end: string): string | null {
   return null;
 }
 
+async function getPublicSettings(database: D1Database): Promise<Record<string, any>> {
+  const now = Date.now();
+  if (cacheIsFresh(publicSettingsCache, now)) return publicSettingsCache!.value;
+
+  const settings = buildPublicSettings(await db.getSettingsByKeys(database, PUBLIC_SETTING_KEYS));
+  publicSettingsCache = { value: settings, expiresAt: now + PUBLIC_METADATA_CACHE_MS };
+  return settings;
+}
+
+async function getPublicClientsSnapshot(database: D1Database): Promise<PublicClientsSnapshot> {
+  const now = Date.now();
+  if (cacheIsFresh(publicClientsSnapshotCache, now)) return publicClientsSnapshotCache!;
+
+  const clients = await db.listPublicClientRows(database);
+  const publicClients = clients
+    .filter(client => !client.hidden)
+    .map(toPublicClient);
+  const publicClientIds = new Set(clients.filter(client => !client.hidden).map(client => client.uuid));
+  const nodes = publicClients.map((client) => ({
+    ...client,
+    tags: client.tags ? client.tags.split(';').filter(Boolean) : [],
+  }));
+  const expiresAt = now + PUBLIC_METADATA_CACHE_MS;
+  for (const client of clients) {
+    publicClientVisibilityCache.set(client.uuid, { value: !client.hidden, expiresAt });
+  }
+  publicClientsSnapshotCache = {
+    clients: publicClients,
+    nodes,
+    publicClientIds,
+    expiresAt,
+  };
+  return publicClientsSnapshotCache;
+}
+
+async function getPublicPingTasks(database: D1Database, publicClientIds: Set<string>): Promise<db.PingTask[]> {
+  const now = Date.now();
+  if (!cacheIsFresh(publicPingTasksCache, now)) {
+    publicPingTasksCache = {
+      value: await db.listPingTasks(database),
+      expiresAt: now + PUBLIC_METADATA_CACHE_MS,
+    };
+  }
+  const tasks = publicPingTasksCache?.value || [];
+  return tasks
+    .map(task => toPublicPingTask(task, publicClientIds))
+    .filter((task): task is db.PingTask => Boolean(task));
+}
+
 async function isPublicClient(database: D1Database, uuid: string): Promise<boolean> {
-  const client = await db.getClient(database, uuid);
-  return Boolean(client && !client.hidden);
+  const cached = publicClientVisibilityCache.get(uuid);
+  if (cacheIsFresh(cached)) return cached!.value;
+
+  const client = await db.getClientVisibility(database, uuid);
+  const value = Boolean(client && !client.hidden);
+  publicClientVisibilityCache.set(uuid, { value, expiresAt: Date.now() + PUBLIC_METADATA_CACHE_MS });
+  return value;
 }
 
 function toPublicPingTask(task: db.PingTask, publicClientIds: Set<string>): db.PingTask | null {
@@ -273,24 +420,41 @@ function parseTimeMs(value: string | null | undefined): number {
   return Number.isFinite(ms) ? ms : 0;
 }
 
-async function getLoginRetryAfterSeconds(
+export type LoginRateLimitStateByBucket = Map<string, db.LoginRateLimit | null>;
+
+export async function loadLoginRateLimitStates(
   database: D1Database,
   buckets: string[],
-  nowMs: number,
-): Promise<number> {
-  let lockedUntilMs = 0;
+): Promise<LoginRateLimitStateByBucket> {
+  const states: LoginRateLimitStateByBucket = new Map();
   for (const bucket of buckets) {
-    const state = await db.getLoginRateLimit(database, bucket);
+    states.set(bucket, await db.getLoginRateLimit(database, bucket));
+  }
+  return states;
+}
+
+export function getLoginRetryAfterSeconds(
+  states: LoginRateLimitStateByBucket,
+  nowMs: number,
+): number {
+  let lockedUntilMs = 0;
+  for (const state of states.values()) {
     lockedUntilMs = Math.max(lockedUntilMs, parseTimeMs(state?.locked_until));
   }
   if (lockedUntilMs <= nowMs) return 0;
   return Math.ceil((lockedUntilMs - nowMs) / 1000);
 }
 
-async function recordLoginFailure(database: D1Database, buckets: string[], nowMs: number): Promise<void> {
+export async function recordLoginFailure(
+  database: D1Database,
+  buckets: string[],
+  nowMs: number,
+  states?: LoginRateLimitStateByBucket,
+): Promise<void> {
   const nowIso = new Date(nowMs).toISOString();
+  const rateLimitStates = states || await loadLoginRateLimitStates(database, buckets);
   for (const bucket of buckets) {
-    const state = await db.getLoginRateLimit(database, bucket);
+    const state = rateLimitStates.has(bucket) ? rateLimitStates.get(bucket) : await db.getLoginRateLimit(database, bucket);
     const firstFailedMs = parseTimeMs(state?.first_failed_at);
     const inWindow = Boolean(state) && nowMs - firstFailedMs <= LOGIN_RATE_LIMIT_WINDOW_MS;
     const failures = inWindow ? Number(state?.failures || 0) + 1 : 1;
@@ -303,13 +467,15 @@ async function recordLoginFailure(database: D1Database, buckets: string[], nowMs
       )
       : 0;
 
-    await db.setLoginRateLimit(database, {
+    const nextState = {
       bucket,
       failures,
       first_failed_at: firstFailedAt,
       last_failed_at: nowIso,
       locked_until: shouldLock ? new Date(nowMs + lockMs).toISOString() : null,
-    });
+    };
+    await db.setLoginRateLimit(database, nextState);
+    rateLimitStates.set(bucket, nextState);
   }
 }
 
@@ -319,12 +485,56 @@ async function clearLoginFailures(database: D1Database, buckets: string[]): Prom
   }
 }
 
-async function auditLoginFailure(
+export async function cleanupExpiredLoginRateLimits(database: D1Database, nowMs: number): Promise<boolean> {
+  if (
+    lastLoginRateLimitCleanupAt > 0 &&
+    nowMs - lastLoginRateLimitCleanupAt < LOGIN_RATE_LIMIT_CLEANUP_INTERVAL_MS
+  ) {
+    return false;
+  }
+  await db.deleteLoginRateLimitsBefore(
+    database,
+    new Date(nowMs - LOGIN_RATE_LIMIT_CLEANUP_AGE_MS).toISOString(),
+  );
+  lastLoginRateLimitCleanupAt = nowMs;
+  return true;
+}
+
+export function resetLoginRateLimitCleanupForTests(): void {
+  lastLoginRateLimitCleanupAt = 0;
+}
+
+function loginFailureAuditThrottleKey(username: string, ip: string, reason: string): string {
+  return `${reason}:${ip}:${normalizeLoginUsername(username)}`;
+}
+
+export function resetLoginFailureAuditThrottleForTests(): void {
+  loginFailureAuditThrottle.clear();
+}
+
+export async function auditLoginFailure(
   database: D1Database,
   username: string,
   ip: string,
   reason: string,
+  nowMs = Date.now(),
 ): Promise<void> {
+  const key = loginFailureAuditThrottleKey(username, ip, reason);
+  const existing = loginFailureAuditThrottle.get(key);
+  if (existing && existing.expiresAt > nowMs) return;
+
+  if (loginFailureAuditThrottle.size >= LOGIN_FAILURE_AUDIT_THROTTLE_MAX_ENTRIES) {
+    for (const [entryKey, entry] of loginFailureAuditThrottle) {
+      if (entry.expiresAt <= nowMs || loginFailureAuditThrottle.size >= LOGIN_FAILURE_AUDIT_THROTTLE_MAX_ENTRIES) {
+        loginFailureAuditThrottle.delete(entryKey);
+      }
+      if (loginFailureAuditThrottle.size < LOGIN_FAILURE_AUDIT_THROTTLE_MAX_ENTRIES) break;
+    }
+  }
+
+  loginFailureAuditThrottle.set(key, {
+    expiresAt: nowMs + LOGIN_FAILURE_AUDIT_THROTTLE_MS,
+  });
   await db.insertAuditLog(
     database,
     username.slice(0, MAX_LOGIN_USERNAME_LENGTH) || 'anonymous',
@@ -358,15 +568,13 @@ publicRoutes.post('/login', async (c) => {
   const clientIp = getClientIp(c);
   const rateLimitBuckets = loginRateLimitBuckets(clientIp, username);
   const nowMs = Date.now();
-  await db.deleteLoginRateLimitsBefore(
-    c.env.DB,
-    new Date(nowMs - LOGIN_RATE_LIMIT_CLEANUP_AGE_MS).toISOString(),
-  );
+  await cleanupExpiredLoginRateLimits(c.env.DB, nowMs);
 
-  const retryAfter = await getLoginRetryAfterSeconds(c.env.DB, rateLimitBuckets, nowMs);
+  const rateLimitStates = await loadLoginRateLimitStates(c.env.DB, rateLimitBuckets);
+  const retryAfter = getLoginRetryAfterSeconds(rateLimitStates, nowMs);
   if (retryAfter > 0) {
     c.header('Retry-After', String(retryAfter));
-    await auditLoginFailure(c.env.DB, username, clientIp, 'rate_limited');
+    await auditLoginFailure(c.env.DB, username, clientIp, 'rate_limited', nowMs);
     return c.json({ error: `登录尝试过于频繁，请 ${retryAfter} 秒后再试` }, 429);
   }
 
@@ -382,15 +590,17 @@ publicRoutes.post('/login', async (c) => {
 
   const user = await db.getUserByUsername(c.env.DB, username);
   if (!user) {
-    await recordLoginFailure(c.env.DB, rateLimitBuckets, Date.now());
-    await auditLoginFailure(c.env.DB, username, clientIp, 'unknown_user');
+    const failedAt = Date.now();
+    await recordLoginFailure(c.env.DB, rateLimitBuckets, failedAt, rateLimitStates);
+    await auditLoginFailure(c.env.DB, username, clientIp, 'unknown_user', failedAt);
     return c.json({ error: '用户名或密码错误' }, 401);
   }
 
   const valid = await verifyPassword(password, user.passwd);
   if (!valid) {
-    await recordLoginFailure(c.env.DB, rateLimitBuckets, Date.now());
-    await auditLoginFailure(c.env.DB, username, clientIp, 'invalid_password');
+    const failedAt = Date.now();
+    await recordLoginFailure(c.env.DB, rateLimitBuckets, failedAt, rateLimitStates);
+    await auditLoginFailure(c.env.DB, username, clientIp, 'invalid_password', failedAt);
     return c.json({ error: '用户名或密码错误' }, 401);
   }
 
@@ -463,13 +673,9 @@ publicRoutes.get('/clients', async (c) => {
   const limited = await guardPublicMetadata(c, 'clients');
   if (limited) return limited;
 
-  const clients = await db.listClients(c.env.DB);
-  // 过滤隐藏的客户端，移除敏感信息
-  const publicClients = clients
-    .filter(c => !c.hidden)
-    .map(toPublicClient);
+  const snapshot = await getPublicClientsSnapshot(c.env.DB);
   setPublicCache(c, PUBLIC_METADATA_CACHE_SECONDS);
-  return c.json(publicClients);
+  return c.json(snapshot.clients);
 });
 
 // 获取公开设置
@@ -477,9 +683,8 @@ publicRoutes.get('/public', async (c) => {
   const limited = await guardPublicMetadata(c, 'settings');
   if (limited) return limited;
 
-  const settings = await db.getAllSettings(c.env.DB);
   setPublicCache(c, PUBLIC_METADATA_CACHE_SECONDS);
-  return c.json(buildPublicSettings(settings));
+  return c.json(await getPublicSettings(c.env.DB));
 });
 
 // 获取客户端最近的监控记录
@@ -490,12 +695,13 @@ publicRoutes.get('/recent/:uuid', async (c) => {
   const uuid = c.req.param('uuid');
   const limit = readIntParam(c.req.query('limit'), 30, 150);
   if (!(await isPublicClient(c.env.DB, uuid))) {
-    setPublicCache(c, PUBLIC_HISTORY_CACHE_SECONDS);
-    return c.json([]);
+    return setPublicHistoryCache(c, publicHistoryCacheKey(c, 'recent'), []);
   }
+  const cacheKey = publicHistoryCacheKey(c, 'recent');
+  const cached = getPublicHistoryCache(c, cacheKey);
+  if (cached) return cached;
   const records = await db.getRecentRecords(c.env.DB, uuid, limit);
-  setPublicCache(c, PUBLIC_HISTORY_CACHE_SECONDS);
-  return c.json(records);
+  return setPublicHistoryCache(c, cacheKey, records);
 });
 
 // 获取系统负载历史记录
@@ -512,15 +718,17 @@ publicRoutes.get('/records/load', async (c) => {
   }
 
   if (!(await isPublicClient(c.env.DB, uuid))) {
+    const cacheKey = publicHistoryCacheKey(c, 'records-load');
     if (wantsPagedResponse(c)) {
       const page = readIntParam(c.req.query('page'), 1, 100000);
       const limit = readIntParam(c.req.query('limit'), 100, 500);
-      setPublicCache(c, PUBLIC_HISTORY_CACHE_SECONDS);
-      return c.json(emptyPagedResult(page, limit));
+      return setPublicHistoryCache(c, cacheKey, emptyPagedResult(page, limit));
     }
-    setPublicCache(c, PUBLIC_HISTORY_CACHE_SECONDS);
-    return c.json([]);
+    return setPublicHistoryCache(c, cacheKey, []);
   }
+  const cacheKey = publicHistoryCacheKey(c, 'records-load');
+  const cached = getPublicHistoryCache(c, cacheKey);
+  if (cached) return cached;
 
   if (start && end) {
     const rangeError = validatePublicTimeRange(start, end);
@@ -530,19 +738,16 @@ publicRoutes.get('/records/load', async (c) => {
     if (wantsPagedResponse(c)) {
       const page = readIntParam(c.req.query('page'), 1, 100000);
       const limit = readIntParam(limitQuery, 100, 500);
-      setPublicCache(c, PUBLIC_HISTORY_CACHE_SECONDS);
-      return c.json(await db.getRecordsByTimeRangePaged(c.env.DB, uuid, start, end, page, limit));
+      return setPublicHistoryCache(c, cacheKey, await db.getRecordsByTimeRangePaged(c.env.DB, uuid, start, end, page, limit));
     }
 
     const limit = readIntParam(limitQuery, 500, 1000);
-    setPublicCache(c, PUBLIC_HISTORY_CACHE_SECONDS);
-    return c.json(await db.getRecordsByTimeRangeLimited(c.env.DB, uuid, start, end, limit));
+    return setPublicHistoryCache(c, cacheKey, await db.getRecordsByTimeRangeLimited(c.env.DB, uuid, start, end, limit));
   }
 
   const records = await db.getRecentRecords(c.env.DB, uuid, readIntParam(c.req.query('limit'), 150, 500));
   if (wantsPagedResponse(c)) {
-    setPublicCache(c, PUBLIC_HISTORY_CACHE_SECONDS);
-    return c.json({
+    return setPublicHistoryCache(c, cacheKey, {
       data: records,
       total: records.length,
       page: 1,
@@ -550,8 +755,7 @@ publicRoutes.get('/records/load', async (c) => {
       has_more: false,
     });
   }
-  setPublicCache(c, PUBLIC_HISTORY_CACHE_SECONDS);
-  return c.json(records);
+  return setPublicHistoryCache(c, cacheKey, records);
 });
 
 // 获取 GPU 记录
@@ -569,14 +773,16 @@ publicRoutes.get('/records/gpu', async (c) => {
   }
 
   if (!(await isPublicClient(c.env.DB, uuid))) {
+    const cacheKey = publicHistoryCacheKey(c, 'records-gpu');
     if (wantsPagedResponse(c)) {
       const page = readIntParam(c.req.query('page'), 1, 100000);
-      setPublicCache(c, PUBLIC_HISTORY_CACHE_SECONDS);
-      return c.json(emptyPagedResult(page, limit));
+      return setPublicHistoryCache(c, cacheKey, emptyPagedResult(page, limit));
     }
-    setPublicCache(c, PUBLIC_HISTORY_CACHE_SECONDS);
-    return c.json([]);
+    return setPublicHistoryCache(c, cacheKey, []);
   }
+  const cacheKey = publicHistoryCacheKey(c, 'records-gpu');
+  const cached = getPublicHistoryCache(c, cacheKey);
+  if (cached) return cached;
 
   if (wantsPagedResponse(c)) {
     if (start && end) {
@@ -584,8 +790,7 @@ publicRoutes.get('/records/gpu', async (c) => {
       if (rangeError) return c.json({ error: rangeError }, 400);
     }
     const page = readIntParam(c.req.query('page'), 1, 100000);
-    setPublicCache(c, PUBLIC_HISTORY_CACHE_SECONDS);
-    return c.json(await db.getGPURecordsPaged(c.env.DB, uuid, start, end, page, limit));
+    return setPublicHistoryCache(c, cacheKey, await db.getGPURecordsPaged(c.env.DB, uuid, start, end, page, limit));
   }
 
   if (start && end) {
@@ -594,8 +799,7 @@ publicRoutes.get('/records/gpu', async (c) => {
   }
 
   const records = await db.getGPURecords(c.env.DB, uuid, start, end, limit);
-  setPublicCache(c, PUBLIC_HISTORY_CACHE_SECONDS);
-  return c.json(records);
+  return setPublicHistoryCache(c, cacheKey, records);
 });
 
 // 获取 Ping 记录
@@ -612,24 +816,58 @@ publicRoutes.get('/records/ping', async (c) => {
   }
 
   if (!(await isPublicClient(c.env.DB, uuid))) {
+    const cacheKey = publicHistoryCacheKey(c, 'records-ping');
     if (wantsPagedResponse(c)) {
       const page = readIntParam(c.req.query('page'), 1, 100000);
-      setPublicCache(c, PUBLIC_HISTORY_CACHE_SECONDS);
-      return c.json(emptyPagedResult(page, limit));
+      return setPublicHistoryCache(c, cacheKey, emptyPagedResult(page, limit));
     }
-    setPublicCache(c, PUBLIC_HISTORY_CACHE_SECONDS);
-    return c.json([]);
+    return setPublicHistoryCache(c, cacheKey, []);
   }
+  const cacheKey = publicHistoryCacheKey(c, 'records-ping');
+  const cached = getPublicHistoryCache(c, cacheKey);
+  if (cached) return cached;
 
   if (wantsPagedResponse(c)) {
     const page = readIntParam(c.req.query('page'), 1, 100000);
-    setPublicCache(c, PUBLIC_HISTORY_CACHE_SECONDS);
-    return c.json(await db.getPingRecordsPaged(c.env.DB, uuid, taskId, page, limit));
+    return setPublicHistoryCache(c, cacheKey, await db.getPingRecordsPaged(c.env.DB, uuid, taskId, page, limit));
   }
 
   const records = await db.getPingRecords(c.env.DB, uuid, taskId, limit);
-  setPublicCache(c, PUBLIC_HISTORY_CACHE_SECONDS);
-  return c.json(records);
+  return setPublicHistoryCache(c, cacheKey, records);
+});
+
+// 批量获取 Ping 记录。详情页用它一次读取多个任务，避免同一批 ping_snapshots 被重复扫描。
+publicRoutes.get('/records/ping/batch', async (c) => {
+  const limited = await guardPublicHistory(c, 'records-ping-batch');
+  if (limited) return limited;
+
+  const uuid = c.req.query('uuid');
+  const taskSpecs = readPingTaskHistorySpecs(c.req.query('task_specs'), 16);
+  const taskIds = taskSpecs.length > 0
+    ? taskSpecs.map(task => task.taskId)
+    : readIntListParam(c.req.query('task_ids'), 16);
+  const limit = readIntParam(c.req.query('limit'), 120, 360);
+  const baseIntervalSec = readIntParam(c.req.query('base_interval'), 60, 86_400);
+
+  if (!uuid || taskIds.length === 0) {
+    return c.json({ error: '缺少参数' }, 400);
+  }
+
+  if (!(await isPublicClient(c.env.DB, uuid))) {
+    return setPublicHistoryCache(c, publicHistoryCacheKey(c, 'records-ping-batch'), {});
+  }
+  const cacheKey = publicHistoryCacheKey(c, 'records-ping-batch');
+  const cached = getPublicHistoryCache(c, cacheKey);
+  if (cached) return cached;
+
+  const records = await db.getPingRecordsForTasks(
+    c.env.DB,
+    uuid,
+    taskSpecs.length > 0 ? taskSpecs : taskIds,
+    limit,
+    baseIntervalSec,
+  );
+  return setPublicHistoryCache(c, cacheKey, records);
 });
 
 // 获取 Ping 任务列表（公开）
@@ -637,13 +875,9 @@ publicRoutes.get('/task/ping', async (c) => {
   const limited = await guardPublicMetadata(c, 'ping-tasks');
   if (limited) return limited;
 
-  const tasks = await db.listPingTasks(c.env.DB);
-  const clients = await db.listClients(c.env.DB);
-  const publicClientIds = new Set(clients.filter(client => !client.hidden).map(client => client.uuid));
+  const snapshot = await getPublicClientsSnapshot(c.env.DB);
   setPublicCache(c, PUBLIC_METADATA_CACHE_SECONDS);
-  return c.json(tasks
-    .map(task => toPublicPingTask(task, publicClientIds))
-    .filter((task): task is db.PingTask => Boolean(task)));
+  return c.json(await getPublicPingTasks(c.env.DB, snapshot.publicClientIds));
 });
 
 // 节点信息（兼容旧版格式）
@@ -651,18 +885,9 @@ publicRoutes.get('/nodes', async (c) => {
   const limited = await guardPublicMetadata(c, 'nodes');
   if (limited) return limited;
 
-  const clients = await db.listClients(c.env.DB);
-  const nodes = clients
-    .filter(c => !c.hidden)
-    .map((client) => {
-      const publicClient = toPublicClient(client);
-      return {
-        ...publicClient,
-        tags: publicClient.tags ? publicClient.tags.split(';').filter(Boolean) : [],
-      };
-    });
+  const snapshot = await getPublicClientsSnapshot(c.env.DB);
   setPublicCache(c, PUBLIC_METADATA_CACHE_SECONDS);
-  return c.json(nodes);
+  return c.json(snapshot.nodes);
 });
 
 // 实时数据 - 代理到 Durable Object

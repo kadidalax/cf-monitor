@@ -5,8 +5,8 @@
 import { Hono } from 'hono';
 import type { Bindings, Variables } from '../index';
 import * as db from '../db/queries';
-import { buildPublicSettings } from '../settings/schema';
 import { createViewerToken, verifyViewerToken } from '../auth/viewer-token';
+import { getAgentClientIdentityByToken } from './client';
 
 const wsRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 const VIEWER_TOKEN_RATE_LIMIT_WINDOW_MS = 60_000;
@@ -14,6 +14,13 @@ const VIEWER_TOKEN_RATE_LIMIT_MAX = 20;
 const LIVE_CLIENTS_RATE_LIMIT_WINDOW_MS = 60_000;
 const LIVE_CLIENTS_RATE_LIMIT_MAX = 180;
 const LIVE_CLIENTS_CACHE_SECONDS = 2;
+const VIEWER_TTL_CACHE_MS = 30_000;
+
+let viewerTtlCache: { value: number; expiresAt: number } | null = null;
+
+export function invalidateLiveViewerSettingsCache(): void {
+  viewerTtlCache = null;
+}
 
 function bearerToken(c: any): string {
   const authHeader = c.req.header('Authorization') || '';
@@ -48,12 +55,19 @@ function requestIp(c: any): string {
 }
 
 async function viewerTtlMs(c: any): Promise<number> {
-  const settings = buildPublicSettings(await db.getAllSettings(c.env.DB));
-  const seconds = Number(settings.live_poll_active_max_duration_sec || 600);
+  const now = Date.now();
+  if (viewerTtlCache && viewerTtlCache.expiresAt > now) {
+    return viewerTtlCache.value;
+  }
+
+  const storedViewerTtlSec = await db.getSetting(c.env.DB, 'live_poll_active_max_duration_sec');
+  const seconds = Number(storedViewerTtlSec || 600);
   const boundedSeconds = Number.isFinite(seconds)
     ? Math.min(Math.max(seconds, 60), 3600)
     : 600;
-  return Math.floor(boundedSeconds) * 1000;
+  const value = Math.floor(boundedSeconds) * 1000;
+  viewerTtlCache = { value, expiresAt: now + VIEWER_TTL_CACHE_MS };
+  return value;
 }
 
 async function enforceViewerTokenRateLimit(c: any, ip: string): Promise<Response | null> {
@@ -124,7 +138,7 @@ wsRoutes.get('/clients/report', async (c) => {
     return c.json({ error: 'Missing token' }, 401);
   }
 
-  const client = await db.getClientByToken(c.env.DB, token);
+  const client = await getAgentClientIdentityByToken(c.env.DB, token);
   if (!client) {
     return c.json({ error: 'Invalid token' }, 401);
   }
@@ -160,9 +174,11 @@ wsRoutes.get('/ws/live-token', async (c) => {
   const limited = await enforceViewerTokenRateLimit(c, ip);
   if (limited) return limited;
 
+  const ttlMs = await viewerTtlMs(c);
   return c.json(await createViewerToken({
     ip,
     secret,
+    ttlMs,
   }));
 });
 

@@ -36,9 +36,6 @@ CREATE TABLE IF NOT EXISTS clients (
     updated_at TEXT DEFAULT (datetime('now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_clients_token ON clients(token);
-CREATE INDEX IF NOT EXISTS idx_clients_group ON clients("group");
-
 -- 资源监控记录表
 CREATE TABLE IF NOT EXISTS records (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,6 +79,16 @@ CREATE TABLE IF NOT EXISTS gpu_records (
 
 CREATE INDEX IF NOT EXISTS idx_gpu_records_client_time ON gpu_records(client, time);
 CREATE INDEX IF NOT EXISTS idx_gpu_records_time ON gpu_records(time);
+
+CREATE TABLE IF NOT EXISTS gpu_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client TEXT NOT NULL,
+    time TEXT NOT NULL,
+    devices_json TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_gpu_snapshots_client_time ON gpu_snapshots(client, time);
+CREATE INDEX IF NOT EXISTS idx_gpu_snapshots_time ON gpu_snapshots(time);
 
 -- 用户表（仅管理员）
 CREATE TABLE IF NOT EXISTS users (
@@ -129,9 +136,18 @@ CREATE TABLE IF NOT EXISTS ping_records (
     value INTEGER NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_ping_records_client_time ON ping_records(client, time);
-CREATE INDEX IF NOT EXISTS idx_ping_records_task ON ping_records(task_id, time);
+CREATE INDEX IF NOT EXISTS idx_ping_records_client_task_time ON ping_records(client, task_id, time);
 CREATE INDEX IF NOT EXISTS idx_ping_records_time ON ping_records(time);
+
+CREATE TABLE IF NOT EXISTS ping_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client TEXT NOT NULL,
+    time TEXT NOT NULL,
+    values_json TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ping_snapshots_client_time ON ping_snapshots(client, time);
+CREATE INDEX IF NOT EXISTS idx_ping_snapshots_time ON ping_snapshots(time);
 
 -- 离线通知设置表
 CREATE TABLE IF NOT EXISTS offline_notifications (
@@ -185,6 +201,7 @@ INSERT OR IGNORE INTO settings (key, value) VALUES ('ping_record_preserve_time',
 INSERT OR IGNORE INTO settings (key, value) VALUES ('record_persist_interval_sec', '60');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('record_high_watermark_rows', '450000');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('capacity_daily_view_minutes', '60');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('audit_log_preserve_time', '2160');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('live_poll_active_interval_sec', '3');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('live_poll_idle_interval_sec', '600');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('live_poll_active_max_duration_sec', '600');
@@ -192,3 +209,4 @@ INSERT OR IGNORE INTO settings (key, value) VALUES ('notification_method', 'tele
 INSERT OR IGNORE INTO settings (key, value) VALUES ('telegram_bot_token', '');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('telegram_chat_id', '');
 INSERT OR IGNORE INTO settings (key, value) VALUES ('enable_ip_change_notification', 'false');
+INSERT OR REPLACE INTO settings (key, value) VALUES ('schema_bootstrap_version', '2026-06-09-runtime-intervals-v2');

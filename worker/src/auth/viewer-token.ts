@@ -63,14 +63,17 @@ function randomNonce(): string {
 export async function createViewerToken({
   ip,
   secret,
+  ttlMs = TOKEN_TTL_MS,
   now = Date.now(),
 }: {
   ip: string;
   secret: string;
+  ttlMs?: number;
   now?: number;
 }): Promise<{ token: string; expires_at: number }> {
+  const boundedTtlMs = Number.isFinite(ttlMs) && ttlMs > 0 ? ttlMs : TOKEN_TTL_MS;
   const payload: ViewerTokenPayload = {
-    exp: now + TOKEN_TTL_MS,
+    exp: now + boundedTtlMs,
     ip,
     nonce: randomNonce(),
   };

@@ -11,7 +11,7 @@
 import type { DurableObjectState } from '@cloudflare/workers-types';
 import { normalizeMonitorReport, toMonitorRecord } from '../utils/monitor-report';
 import * as db from '../db/queries';
-import { validatePingResults } from '../utils/ping-result';
+import { MAX_PING_RESULTS_PER_REPORT, MAX_PING_VALUE_MS, PING_LOSS_VALUE, validatePingResults } from '../utils/ping-result';
 import {
   buildAdminSettings,
   isRecordPersistenceEnabled as normalizeRecordPersistenceEnabled,
@@ -35,9 +35,23 @@ const RECORD_SETTING_CACHE_MS = 5_000;
 const RECORD_HIGH_WATERMARK_DEFAULT_ROWS = 450_000;
 const RECORD_HIGH_WATERMARK_MIN_ROWS = 1_000;
 const RECORD_HIGH_WATERMARK_MAX_ROWS = 10_000_000;
-const RECORD_CAPACITY_CACHE_MS = 60_000;
+const RECORD_CAPACITY_CACHE_FAR_MS = 60 * 60_000;
+const RECORD_CAPACITY_CACHE_NEAR_MS = 10 * 60_000;
+const RECORD_CAPACITY_CACHE_CRITICAL_MS = 60_000;
 const RECORD_CAPACITY_AUDIT_THROTTLE_MS = 10 * 60 * 1000;
+const HOT_PATH_HEALTH_OK_THROTTLE_MS = 10 * 60 * 1000;
 const POLICY_SETTING_CACHE_MS = 5_000;
+const PING_TASK_CACHE_MS = 30_000;
+const AGENT_POLICY_SETTING_KEYS = [
+  'live_poll_active_interval_sec',
+  'live_poll_idle_interval_sec',
+  'live_poll_active_max_duration_sec',
+];
+const RECORD_PERSISTENCE_SETTING_KEYS = [
+  'record_enabled',
+  'record_persist_interval_sec',
+  'record_high_watermark_rows',
+];
 const HTTP_CLIENT_MIN_TTL_MS = 30_000;
 const HTTP_CLIENT_MAX_TTL_MS = 24 * 60 * 60 * 1000;
 const VIEWER_MIN_TTL_MS = 60_000;
@@ -68,6 +82,12 @@ interface AgentPolicyMessage {
   timestamp: number;
 }
 
+interface PingPersistenceResult {
+  taskId: number;
+  value: number;
+  intervalSec?: number;
+}
+
 interface SessionAttachment {
   role: SessionRole;
   clientId: string;
@@ -96,10 +116,12 @@ export class LiveDataDO {
   private recordPersistIntervalMs: number = RECORD_PERSIST_INTERVAL_MS;
   private recordPersistenceCheckedAt: number = 0;
   private recordHighWatermarkRows: number = RECORD_HIGH_WATERMARK_DEFAULT_ROWS;
-  private recordCapacityCheckedAt: number = 0;
+  private recordCapacityNextCheckAt: number = 0;
   private recordCapacityRows: number = 0;
   private recordCapacityBlocked: boolean = false;
   private recordCapacityLastAuditAt: number = 0;
+  private healthOkLastWriteAt: Map<string, number> = new Map();
+  private recordLastPersistAt: Map<string, number> = new Map();
   private policySettings: AgentPolicySettings = {
     activeIntervalSec: 3,
     idleIntervalSec: 600,
@@ -108,6 +130,7 @@ export class LiveDataDO {
   private policySettingsCheckedAt: number = 0;
   private lastBroadcastPolicyKey: string = '';
   private rateLimitSweepCounter: number = 0;
+  private pingTasksCache: { value: db.PingTask[]; expiresAt: number } | null = null;
 
   constructor(state: DurableObjectState, env: any) {
     this.state = state;
@@ -290,7 +313,7 @@ export class LiveDataDO {
     }
 
     try {
-      const settings = buildAdminSettings(await db.getAllSettings(this.env.DB));
+      const settings = buildAdminSettings(await db.getSettingsByKeys(this.env.DB, AGENT_POLICY_SETTING_KEYS));
       this.policySettings = {
         activeIntervalSec: this.boundIntegerSetting(settings.live_poll_active_interval_sec, 3, 3, 300),
         idleIntervalSec: this.boundIntegerSetting(settings.live_poll_idle_interval_sec, 600, 60, 3600),
@@ -307,6 +330,24 @@ export class LiveDataDO {
     }
     this.policySettingsCheckedAt = now;
     return this.policySettings;
+  }
+
+  private async getPingTasks(now: number, forceRefresh = false): Promise<db.PingTask[]> {
+    if (!this.env?.DB) return [];
+    if (!forceRefresh && this.pingTasksCache && this.pingTasksCache.expiresAt > now) {
+      return this.pingTasksCache.value;
+    }
+
+    const tasks = await db.listPingTasks(this.env.DB);
+    this.pingTasksCache = {
+      value: tasks,
+      expiresAt: now + PING_TASK_CACHE_MS,
+    };
+    return tasks;
+  }
+
+  private invalidatePingTasksCache(): void {
+    this.pingTasksCache = null;
   }
 
   private activeViewerCount(now: number): number {
@@ -775,6 +816,17 @@ export class LiveDataDO {
       return Response.json({ success: true });
     }
 
+    if (request.method === 'POST' && url.pathname === '/record-settings-refresh') {
+      await this.isRecordPersistenceEnabled(Date.now(), true);
+      this.recordCapacityNextCheckAt = 0;
+      return Response.json({ success: true });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/ping-tasks-refresh') {
+      this.invalidatePingTasksCache();
+      return Response.json({ success: true });
+    }
+
     if (request.method === 'GET' && url.pathname === '/policy') {
       return Response.json(await this.buildAgentPolicy(Date.now(), false));
     }
@@ -939,14 +991,23 @@ export class LiveDataDO {
     await this.scheduleExpiryAlarm(now);
   }
 
-  private async shouldPersist(clientId: string, now: number): Promise<boolean> {
+  private async isPersistDue(clientId: string, now: number): Promise<boolean> {
     const storageKey = `record:persist:${clientId}`;
-    const lastPersist = Number(await this.state.storage.get<number>(storageKey) || 0);
+    let lastPersist = this.recordLastPersistAt.get(clientId);
+    if (lastPersist === undefined) {
+      lastPersist = Number(await this.state.storage.get<number>(storageKey) || 0);
+      this.recordLastPersistAt.set(clientId, lastPersist);
+    }
     if (now - lastPersist < this.recordPersistIntervalMs) {
       return false;
     }
-    await this.state.storage.put(storageKey, now);
     return true;
+  }
+
+  private async markPersistAttempt(clientId: string, now: number): Promise<void> {
+    const storageKey = `record:persist:${clientId}`;
+    this.recordLastPersistAt.set(clientId, now);
+    await this.state.storage.put(storageKey, now);
   }
 
   private async persistReportsSequential(
@@ -958,14 +1019,14 @@ export class LiveDataDO {
     }
   }
 
-  private async isRecordPersistenceEnabled(now: number): Promise<boolean> {
+  private async isRecordPersistenceEnabled(now: number, forceRefresh = false): Promise<boolean> {
     if (!this.env?.DB) return false;
-    if (now - this.recordPersistenceCheckedAt < RECORD_SETTING_CACHE_MS) {
+    if (!forceRefresh && now - this.recordPersistenceCheckedAt < RECORD_SETTING_CACHE_MS) {
       return this.recordPersistenceEnabled;
     }
 
     try {
-      const settings = buildAdminSettings(await db.getAllSettings(this.env.DB));
+      const settings = buildAdminSettings(await db.getSettingsByKeys(this.env.DB, RECORD_PERSISTENCE_SETTING_KEYS));
       this.recordPersistenceEnabled = normalizeRecordPersistenceEnabled(settings);
       const intervalSec = Number(settings.record_persist_interval_sec);
       const boundedIntervalSec = Number.isFinite(intervalSec)
@@ -997,17 +1058,26 @@ export class LiveDataDO {
     return this.recordPersistenceEnabled;
   }
 
+  private capacityCheckDelayMs(): number {
+    if (this.recordCapacityBlocked) return RECORD_CAPACITY_CACHE_CRITICAL_MS;
+    if (this.recordHighWatermarkRows <= 0) return RECORD_CAPACITY_CACHE_NEAR_MS;
+    const ratio = this.recordCapacityRows / this.recordHighWatermarkRows;
+    if (ratio >= 0.95) return RECORD_CAPACITY_CACHE_CRITICAL_MS;
+    if (ratio >= 0.8) return RECORD_CAPACITY_CACHE_NEAR_MS;
+    return RECORD_CAPACITY_CACHE_FAR_MS;
+  }
+
   private async canPersistWithinCapacity(now: number): Promise<boolean> {
     if (!this.env?.DB) return false;
-    if (now - this.recordCapacityCheckedAt < RECORD_CAPACITY_CACHE_MS) {
+    if (now < this.recordCapacityNextCheckAt) {
       return !this.recordCapacityBlocked;
     }
 
     try {
-      const counts = await db.getStorageRowCounts(this.env.DB);
-      this.recordCapacityRows = counts.records + counts.gpu_records + counts.ping_records;
+      const counts = await db.getHistoryStorageRowCounts(this.env.DB);
+      this.recordCapacityRows = counts.records + counts.gpu_records + counts.gpu_snapshots + counts.ping_records + counts.ping_snapshots;
       this.recordCapacityBlocked = this.recordCapacityRows >= this.recordHighWatermarkRows;
-      this.recordCapacityCheckedAt = now;
+      this.recordCapacityNextCheckAt = now + this.capacityCheckDelayMs();
       if (this.recordCapacityBlocked && now - this.recordCapacityLastAuditAt >= RECORD_CAPACITY_AUDIT_THROTTLE_MS) {
         this.recordCapacityLastAuditAt = now;
         await bestEffortRecordHealthEvent(
@@ -1019,7 +1089,7 @@ export class LiveDataDO {
         );
       }
     } catch (error) {
-      this.recordCapacityCheckedAt = now;
+      this.recordCapacityNextCheckAt = now + RECORD_CAPACITY_CACHE_NEAR_MS;
       await bestEffortRecordHealthEvent(
         this.env.DB,
         'do_record_persistence',
@@ -1033,8 +1103,21 @@ export class LiveDataDO {
     return !this.recordCapacityBlocked;
   }
 
+  private async recordHotPathHealthOk(component: string, detail: string, now: number): Promise<void> {
+    const previous = this.healthOkLastWriteAt.get(component) || 0;
+    if (now - previous < HOT_PATH_HEALTH_OK_THROTTLE_MS) return;
+    this.healthOkLastWriteAt.set(component, now);
+    await bestEffortRecordHealthEvent(this.env.DB, component, 'ok', detail, {
+      successThrottleMs: HOT_PATH_HEALTH_OK_THROTTLE_MS,
+    });
+  }
+
   private async persistReport(clientId: string, report: any, nowMs: number, force = false): Promise<boolean> {
     if (!this.env?.DB || !report || report.type === 'ping' || report.type === 'pong' || report.type === 'ping_result') {
+      return false;
+    }
+
+    if (!force && !(await this.isPersistDue(clientId, nowMs))) {
       return false;
     }
 
@@ -1046,9 +1129,7 @@ export class LiveDataDO {
       return false;
     }
 
-    if (!force && !(await this.shouldPersist(clientId, nowMs))) {
-      return false;
-    }
+    if (!force) await this.markPersistAttempt(clientId, nowMs);
 
     const time = new Date(nowMs).toISOString();
     try {
@@ -1079,27 +1160,12 @@ export class LiveDataDO {
       ).run();
 
       if (Array.isArray(report.gpus) && report.gpus.length > 0) {
-        const stmt = this.env.DB.prepare(
-          'INSERT INTO gpu_records (client, time, device_index, device_name, mem_total, mem_used, utilization, temperature) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-        );
-        await this.env.DB.batch(report.gpus.map((gpu: any) =>
-          stmt.bind(
-            clientId,
-            time,
-            gpu.device_index ?? 0,
-            gpu.device_name || '',
-            gpu.mem_total || 0,
-            gpu.mem_used || 0,
-            gpu.utilization || 0,
-            gpu.temperature || 0,
-          )
-        ));
+        await db.insertGPURecords(this.env.DB, clientId, time, report.gpus);
       }
-      await bestEffortRecordHealthEvent(
-        this.env.DB,
+      await this.recordHotPathHealthOk(
         'do_record_persistence',
-        'ok',
         `record persisted for ${clientId}`,
+        nowMs,
       );
       return true;
     } catch (error) {
@@ -1119,25 +1185,19 @@ export class LiveDataDO {
     if (!this.env?.DB) return;
 
     try {
-      const tasks = await db.listPingTasks(this.env.DB);
+      const tasks = await this.getPingTasks(nowMs);
       const validated = validatePingResults(result, tasks, clientId);
       if (!validated.ok) return;
 
       const accepted = await this.filterPingResultsByInterval(clientId, validated.results, tasks, nowMs);
       if (accepted.length === 0) return;
 
-      const stmt = this.env.DB.prepare(
-        'INSERT INTO ping_records (client, task_id, time, value) VALUES (?, ?, ?, ?)'
-      );
       const time = new Date(nowMs).toISOString();
-      await this.env.DB.batch(accepted.map((item) =>
-        stmt.bind(clientId, item.taskId, time, item.value)
-      ));
-      await bestEffortRecordHealthEvent(
-        this.env.DB,
+      await db.insertPingSnapshot(this.env.DB, clientId, time, accepted);
+      await this.recordHotPathHealthOk(
         'ping_persistence',
-        'ok',
         `ping result persisted for ${clientId}`,
+        nowMs,
       );
     } catch (error) {
       await bestEffortRecordHealthEvent(
@@ -1161,28 +1221,28 @@ export class LiveDataDO {
 
     try {
       const nowMs = Number.isFinite(Number(payload.timestamp)) ? Number(payload.timestamp) : Date.now();
-      const tasks = await db.listPingTasks(this.env.DB);
-      const validated = validatePingResults(payload.results, tasks, payload.client_id);
-      if (!validated.ok) {
-        return Response.json({ error: validated.error }, { status: validated.status });
+      let accepted: PingPersistenceResult[] = [];
+      const trustedResults = this.trustedPingResults(payload.results);
+      if (trustedResults) {
+        accepted = await this.filterTrustedPingResultsByInterval(payload.client_id, trustedResults, nowMs);
+      } else {
+          const tasks = await this.getPingTasks(nowMs);
+        const validated = validatePingResults(payload.results, tasks, payload.client_id);
+        if (!validated.ok) {
+          return Response.json({ error: validated.error }, { status: validated.status });
+        }
+        accepted = await this.filterPingResultsByInterval(payload.client_id, validated.results, tasks, nowMs);
       }
-      const accepted = await this.filterPingResultsByInterval(payload.client_id, validated.results, tasks, nowMs);
       if (accepted.length === 0) {
         return Response.json({ success: true, accepted: 0, rate_limited: true });
       }
 
-      const stmt = this.env.DB.prepare(
-        'INSERT INTO ping_records (client, task_id, time, value) VALUES (?, ?, ?, ?)'
-      );
       const time = new Date(nowMs).toISOString();
-      await this.env.DB.batch(accepted.map((item) =>
-        stmt.bind(payload.client_id, item.taskId, time, item.value)
-      ));
-      await bestEffortRecordHealthEvent(
-        this.env.DB,
+      await db.insertPingSnapshot(this.env.DB, payload.client_id, time, accepted);
+      await this.recordHotPathHealthOk(
         'ping_persistence',
-        'ok',
         `ping result persisted for ${payload.client_id}`,
+        nowMs,
       );
       return Response.json({ success: true, accepted: accepted.length });
     } catch (error) {
@@ -1205,21 +1265,66 @@ export class LiveDataDO {
     return boundedSec * 1000;
   }
 
+  private pingResultIntervalMs(result: PingPersistenceResult, task: db.PingTask | undefined): number {
+    const intervalSec = Number(result.intervalSec ?? task?.interval_sec ?? 60);
+    const boundedSec = Number.isFinite(intervalSec)
+      ? Math.min(Math.max(Math.floor(intervalSec), 5), 86_400)
+      : 60;
+    return boundedSec * 1000;
+  }
+
+  private trustedPingResults(input: unknown): PingPersistenceResult[] | null {
+    if (!Array.isArray(input) || input.length === 0 || input.length > MAX_PING_RESULTS_PER_REPORT) return null;
+    const results: PingPersistenceResult[] = [];
+    for (const raw of input) {
+      if (!raw || typeof raw !== 'object') return null;
+      const item = raw as Record<string, unknown>;
+      const taskId = Number(item.task_id);
+      const value = Number(item.value);
+      const intervalSec = Number(item.interval_sec);
+      if (
+        !Number.isInteger(taskId) ||
+        taskId <= 0 ||
+        !Number.isFinite(value) ||
+        (value !== PING_LOSS_VALUE && (value < 0 || value > MAX_PING_VALUE_MS)) ||
+        !Number.isFinite(intervalSec)
+      ) {
+        return null;
+      }
+      results.push({
+        taskId,
+        value,
+        intervalSec,
+      });
+    }
+    return results;
+  }
+
   private async filterPingResultsByInterval(
     clientId: string,
-    results: Array<{ taskId: number; value: number }>,
+    results: PingPersistenceResult[],
     tasks: db.PingTask[],
     nowMs: number,
-  ): Promise<Array<{ taskId: number; value: number }>> {
+  ): Promise<PingPersistenceResult[]> {
     const taskMap = new Map<number, db.PingTask>();
     for (const task of tasks) {
       if (typeof task.id === 'number') taskMap.set(task.id, task);
     }
 
-    const accepted: Array<{ taskId: number; value: number }> = [];
+    return this.filterTrustedPingResultsByInterval(clientId, results.map(result => ({
+      ...result,
+      intervalSec: result.intervalSec ?? taskMap.get(result.taskId)?.interval_sec,
+    })), nowMs);
+  }
+
+  private async filterTrustedPingResultsByInterval(
+    clientId: string,
+    results: PingPersistenceResult[],
+    nowMs: number,
+  ): Promise<PingPersistenceResult[]> {
+    const accepted: PingPersistenceResult[] = [];
     for (const result of results) {
-      const task = taskMap.get(result.taskId);
-      const minIntervalMs = this.pingTaskIntervalMs(task);
+      const minIntervalMs = this.pingResultIntervalMs(result, undefined);
       const key = `${PING_RESULT_STORAGE_PREFIX}${clientId}:${result.taskId}`;
       const lastAcceptedMs = Number(await this.state.storage.get<number>(key) || 0);
       if (lastAcceptedMs && nowMs - lastAcceptedMs < minIntervalMs) {

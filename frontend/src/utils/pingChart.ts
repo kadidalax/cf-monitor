@@ -244,19 +244,49 @@ export async function fetchPingTaskSeries(
   if (!taskResponse.ok) throw new Error(`HTTP ${taskResponse.status}`);
 
   const taskData = await taskResponse.json();
-  const tasks = (Array.isArray(taskData) ? taskData : [])
+  const applicableTasks = (Array.isArray(taskData) ? taskData : [])
     .filter((task) => pingTaskAppliesToClient(task, uuid))
     .map((task, index) => normalizePingTask(task, index))
-    .filter((task): task is NormalizedPingTask => Boolean(task))
-    .slice(0, maxTasks);
+    .filter((task): task is NormalizedPingTask => Boolean(task));
+  const tasks = applicableTasks.slice(0, maxTasks);
+
+  const requestLimitForTask = (task: NormalizedPingTask) => {
+    const rangeLimit = rangeHours
+      ? Math.ceil((rangeHours * 3600) / task.intervalSec) + 4
+      : 0;
+    return Math.min(360, Math.max(limit, rangeLimit));
+  };
+
+  if (tasks.length > 0) {
+    const batchLimit = Math.max(...tasks.map(requestLimitForTask));
+    const baseIntervalSec = Math.min(...tasks.map((task) => task.intervalSec));
+    const taskSpecs = tasks
+      .map((task) => `${task.id}:${requestLimitForTask(task)}:${task.intervalSec}`)
+      .join(',');
+    try {
+      const recordsResponse = await fetch(
+        `/api/records/ping/batch?uuid=${encodeURIComponent(uuid)}&task_specs=${encodeURIComponent(taskSpecs)}&base_interval=${baseIntervalSec}&limit=${batchLimit}`,
+        { signal },
+      );
+      if (recordsResponse.ok) {
+        const recordsByTask = await recordsResponse.json();
+        const series = tasks.map((task) => ({
+          task,
+          records: Array.isArray(recordsByTask?.[String(task.id)])
+            ? recordsByTask[String(task.id)]
+            : [],
+        }));
+        return limitPingSeriesToRecentRange(series, rangeHours);
+      }
+    } catch {
+      // Fall back to the legacy per-task endpoint below.
+    }
+  }
 
   const series = await Promise.all(
     tasks.map(async (task) => {
       try {
-        const rangeLimit = rangeHours
-          ? Math.ceil((rangeHours * 3600) / task.intervalSec) + 4
-          : 0;
-        const requestLimit = Math.min(360, Math.max(limit, rangeLimit));
+        const requestLimit = requestLimitForTask(task);
         const recordsResponse = await fetch(
           `/api/records/ping?uuid=${encodeURIComponent(uuid)}&task_id=${task.id}&limit=${requestLimit}`,
           { signal },

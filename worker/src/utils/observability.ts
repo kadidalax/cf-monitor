@@ -92,6 +92,7 @@ export async function recordHealthEvent(
     auditUser?: string;
     auditLevel?: string;
     auditThrottleMs?: number;
+    successThrottleMs?: number;
     nowMs?: number;
   } = {},
 ): Promise<void> {
@@ -100,6 +101,12 @@ export async function recordHealthEvent(
   const nowMs = options.nowMs ?? Date.now();
   const at = nowIso(nowMs);
   const previous = parseHealthEvent(await db.getSetting(database, healthKey(component)), component);
+  if (status === 'ok' && options.successThrottleMs && previous?.status === 'ok' && previous.last_success_at) {
+    const previousSuccessMs = Date.parse(previous.last_success_at);
+    if (Number.isFinite(previousSuccessMs) && nowMs - previousSuccessMs < options.successThrottleMs) {
+      return;
+    }
+  }
   const event: HealthEvent = {
     component,
     status,

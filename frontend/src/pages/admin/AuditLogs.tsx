@@ -101,6 +101,7 @@ export default function AdminAuditLogs() {
   const apiFetch = useApi();
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [total, setTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('all');
   const [search, setSearch] = useState('');
@@ -114,6 +115,7 @@ export default function AdminAuditLogs() {
       if (data && typeof data === 'object') {
         if (Array.isArray((data as any).data)) setLogs((data as any).data);
         setTotal(Number((data as any).total || 0));
+        setHasMore(Boolean((data as any).has_more));
       }
       setLoading(false);
     });
@@ -136,7 +138,8 @@ export default function AdminAuditLogs() {
   }, [logs, filter, search]);
 
   const uniqueActions = Array.from(new Set(logs.map(l => l.action)));
-  const totalPages = Math.max(1, Math.ceil(total / Number(pageSize || 50)));
+  const knownPages = Math.max(page, Math.ceil(total / Number(pageSize || 50)));
+  const pageLabel = hasMore ? `第 ${page} 页，至少 ${total} 条` : `第 ${page} / ${knownPages} 页，共 ${total} 条`;
 
   if (loading) return <Loading />;
 
@@ -239,13 +242,13 @@ export default function AdminAuditLogs() {
 
         <Flex justify="between" align="center" wrap="wrap" gap="3">
           <Text size="2" color="gray">
-            第 {page} / {totalPages} 页，共 {total} 条
+            {pageLabel}
           </Text>
           <Flex gap="2">
             <Button variant="soft" disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
               上一页
             </Button>
-            <Button variant="soft" disabled={page >= totalPages} onClick={() => setPage((value) => Math.min(totalPages, value + 1))}>
+            <Button variant="soft" disabled={!hasMore} onClick={() => setPage((value) => value + 1)}>
               下一页
             </Button>
           </Flex>

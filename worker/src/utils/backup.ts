@@ -14,7 +14,9 @@ export const BACKUP_EXCLUDED_MODULES = [
   'users',
   'records',
   'gpu_records',
+  'gpu_snapshots',
   'ping_records',
+  'ping_snapshots',
   'audit_logs',
 ];
 export const MAX_BACKUP_BYTES = 5 * 1024 * 1024;

@@ -17,6 +17,7 @@ import { getAdminSessionToken, verifyAdminCsrfToken } from './auth/session';
 import { buildAdminSettings } from './settings/schema';
 import { escapeTelegramHtml } from './utils/telegram';
 import { bestEffortRecordHealthEvent, errorDetail } from './utils/observability';
+import type { Client as MonitorClient, ScheduledClientRow } from './db/queries';
 
 // 类型定义
 export type Bindings = {
@@ -36,10 +37,14 @@ export type Variables = {
   clientUuid?: string;
   clientName?: string;
   clientHidden?: boolean;
+  clientRecord?: MonitorClient;
 };
 
 const app = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 const SOURCE_REVISION = '2026-06-07-p2-audit-fixes';
+const CSRF_REJECTION_AUDIT_THROTTLE_MS = 60_000;
+const CSRF_REJECTION_AUDIT_THROTTLE_MAX_ENTRIES = 512;
+const csrfRejectionAuditThrottle = new Map<string, { expiresAt: number }>();
 
 const SECURITY_HEADERS: Record<string, string> = {
   'X-Content-Type-Options': 'nosniff',
@@ -48,6 +53,57 @@ const SECURITY_HEADERS: Record<string, string> = {
   'Permissions-Policy': 'camera=(), geolocation=(), microphone=()',
   'Content-Security-Policy': "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; form-action 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ws: wss:",
 };
+
+function requestIp(c: any): string {
+  const forwardedFor = c.req.header('X-Forwarded-For') || '';
+  return (
+    c.req.header('CF-Connecting-IP') ||
+    c.req.header('X-Real-IP') ||
+    forwardedFor.split(',')[0]?.trim() ||
+    'unknown'
+  );
+}
+
+function csrfRejectionAuditKey(username: string, ip: string, path: string): string {
+  return `${username}:${ip}:${path}`;
+}
+
+export function resetCsrfRejectionAuditThrottleForTests(): void {
+  csrfRejectionAuditThrottle.clear();
+}
+
+export async function auditCsrfRejection(
+  database: D1Database,
+  username: string,
+  ip: string,
+  path: string,
+  nowMs = Date.now(),
+): Promise<boolean> {
+  const key = csrfRejectionAuditKey(username, ip, path);
+  const existing = csrfRejectionAuditThrottle.get(key);
+  if (existing && existing.expiresAt > nowMs) return false;
+
+  if (csrfRejectionAuditThrottle.size >= CSRF_REJECTION_AUDIT_THROTTLE_MAX_ENTRIES) {
+    for (const [entryKey, entry] of csrfRejectionAuditThrottle) {
+      if (entry.expiresAt <= nowMs || csrfRejectionAuditThrottle.size >= CSRF_REJECTION_AUDIT_THROTTLE_MAX_ENTRIES) {
+        csrfRejectionAuditThrottle.delete(entryKey);
+      }
+      if (csrfRejectionAuditThrottle.size < CSRF_REJECTION_AUDIT_THROTTLE_MAX_ENTRIES) break;
+    }
+  }
+
+  csrfRejectionAuditThrottle.set(key, {
+    expiresAt: nowMs + CSRF_REJECTION_AUDIT_THROTTLE_MS,
+  });
+  await db.insertAuditLog(
+    database,
+    username,
+    'csrf_rejected',
+    `拒绝缺少或无效 CSRF token 的管理写请求: ${path}; ip=${ip}`,
+    'warning',
+  );
+  return true;
+}
 
 app.use('*', async (c, next) => {
   await next();
@@ -98,7 +154,8 @@ app.use('/api/admin/*', async (c, next) => {
   c.set('username', payload.username);
   if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method) && !verifyAdminCsrfToken(c)) {
     try {
-      await db.insertAuditLog(c.env.DB, payload.username, 'csrf_rejected', `拒绝缺少或无效 CSRF token 的管理写请求: ${new URL(c.req.url).pathname}`, 'warning');
+      const path = new URL(c.req.url).pathname;
+      await auditCsrfRejection(c.env.DB, payload.username, requestIp(c), path);
     } catch {
       // Keep CSRF rejection independent from audit logging availability.
     }
@@ -137,8 +194,76 @@ app.notFound((c) => {
   return c.json({ error: 'Not Found' }, 404);
 });
 
-async function sendTelegram(env: Bindings, text: string): Promise<boolean> {
-  const settings = await db.getAllSettings(env.DB);
+type ScheduledSettings = Record<string, string>;
+type ScheduledAdminSettings = ReturnType<typeof buildAdminSettings>;
+type ScheduledMonitorClient = ScheduledClientRow;
+const SCHEDULED_SETTING_KEYS = [
+  'notification_method',
+  'telegram_bot_token',
+  'telegram_chat_id',
+  'record_preserve_time',
+  'ping_record_preserve_time',
+  'audit_log_preserve_time',
+  'offline_notify_never_reported',
+];
+
+interface ScheduledRunContext {
+  getSettings(): Promise<ScheduledSettings>;
+  getAdminSettings(): Promise<ScheduledAdminSettings>;
+  getClients(clientIds?: string[]): Promise<ScheduledMonitorClient[]>;
+}
+
+function normalizeScheduledClientIds(clientIds: string[] | undefined): string[] | null {
+  if (clientIds === undefined) return null;
+  return [...new Set(
+    clientIds
+      .filter((clientId): clientId is string => typeof clientId === 'string')
+      .map(clientId => clientId.trim())
+      .filter(Boolean),
+  )].sort();
+}
+
+export function createScheduledRunContext(env: Bindings): ScheduledRunContext {
+  let settingsPromise: Promise<ScheduledSettings> | null = null;
+  let adminSettingsPromise: Promise<ScheduledAdminSettings> | null = null;
+  let clientsPromise: Promise<ScheduledMonitorClient[]> | null = null;
+  const clientsByIdsPromises = new Map<string, Promise<ScheduledMonitorClient[]>>();
+
+  return {
+    getSettings() {
+      settingsPromise ||= db.getSettingsByKeys(env.DB, SCHEDULED_SETTING_KEYS);
+      return settingsPromise;
+    },
+    getAdminSettings() {
+      adminSettingsPromise ||= this.getSettings().then(settings => buildAdminSettings(settings));
+      return adminSettingsPromise;
+    },
+    getClients(clientIds) {
+      const normalizedIds = normalizeScheduledClientIds(clientIds);
+      if (normalizedIds === null) {
+        clientsPromise ||= db.listScheduledClientRows(env.DB);
+        return clientsPromise;
+      }
+      if (normalizedIds.length === 0) {
+        return Promise.resolve([]);
+      }
+      if (clientsPromise) {
+        const idSet = new Set(normalizedIds);
+        return clientsPromise.then(clients => clients.filter(client => idSet.has(client.uuid)));
+      }
+      const cacheKey = normalizedIds.join('\0');
+      let promise = clientsByIdsPromises.get(cacheKey);
+      if (!promise) {
+        promise = db.getScheduledClientRowsByIds(env.DB, normalizedIds);
+        clientsByIdsPromises.set(cacheKey, promise);
+      }
+      return promise;
+    },
+  };
+}
+
+async function sendTelegram(env: Bindings, context: ScheduledRunContext, text: string): Promise<boolean> {
+  const settings = await context.getSettings();
   if (settings['notification_method'] !== 'telegram') {
     await bestEffortRecordHealthEvent(env.DB, 'telegram', 'disabled', 'notification_method is not telegram');
     return false;
@@ -174,7 +299,9 @@ async function sendTelegram(env: Bindings, text: string): Promise<boolean> {
       return false;
     }
 
-    await bestEffortRecordHealthEvent(env.DB, 'telegram', 'ok', 'Telegram message sent');
+    await bestEffortRecordHealthEvent(env.DB, 'telegram', 'ok', 'Telegram message sent', {
+      successThrottleMs: 60 * 60 * 1000,
+    });
     return true;
   } catch (error) {
     await bestEffortRecordHealthEvent(
@@ -188,8 +315,8 @@ async function sendTelegram(env: Bindings, text: string): Promise<boolean> {
   }
 }
 
-async function runRecordCleanup(env: Bindings, now: Date): Promise<void> {
-  const settings = await db.getAllSettings(env.DB);
+async function runRecordCleanup(env: Bindings, context: ScheduledRunContext, now: Date): Promise<void> {
+  const settings = await context.getSettings();
   const recordHours = Math.min(72, Math.max(1, Number(settings['record_preserve_time'] || 72)));
   const pingHours = Math.min(72, Math.max(1, Number(settings['ping_record_preserve_time'] || recordHours)));
   const auditHours = Math.max(24, Number(settings['audit_log_preserve_time'] || 2160));
@@ -198,32 +325,26 @@ async function runRecordCleanup(env: Bindings, now: Date): Promise<void> {
   const pingBefore = new Date(now.getTime() - pingHours * 60 * 60 * 1000).toISOString();
   const auditBefore = new Date(now.getTime() - auditHours * 60 * 60 * 1000).toISOString();
 
-  const backlogBefore = await db.getExpiredRowCounts(env.DB, {
-    records: recordBefore,
-    ping_records: pingBefore,
-    audit_logs: auditBefore,
-  });
   const recordDeleted = await db.deleteOldRecords(env.DB, recordBefore);
   const pingDeleted = await db.deleteOldPingRecords(env.DB, pingBefore);
   const auditDeleted = await db.deleteOldAuditLogs(env.DB, auditBefore);
-  const backlogAfter = await db.getExpiredRowCounts(env.DB, {
-    records: recordBefore,
-    ping_records: pingBefore,
-    audit_logs: auditBefore,
-  });
+  const deleted = {
+    ...recordDeleted,
+    ...pingDeleted,
+    ...auditDeleted,
+  };
+  const deletedRows = Object.values(deleted).reduce((sum, value) => sum + Number(value || 0), 0);
+  if (deletedRows === 0) {
+    return;
+  }
   await db.insertAuditLog(env.DB, 'system', 'cron_cleanup', `分批清理完成: ${JSON.stringify({
     before: {
       records: recordBefore,
       ping_records: pingBefore,
       audit_logs: auditBefore,
     },
-    deleted: {
-      ...recordDeleted,
-      ...pingDeleted,
-      ...auditDeleted,
-    },
-    expired_backlog_before: backlogBefore,
-    expired_backlog_after: backlogAfter,
+    deleted,
+    expired_backlog_after: 'skipped_for_quota',
   })}`);
 }
 
@@ -273,17 +394,20 @@ export function evaluateOfflineNotificationCandidate(args: {
   };
 }
 
-async function runOfflineCheck(env: Bindings, now: Date): Promise<void> {
+async function runOfflineCheck(env: Bindings, context: ScheduledRunContext, now: Date): Promise<void> {
   const notifications = await db.listOfflineNotifications(env.DB);
   const enabled = notifications.filter((item: any) => item.enable);
   if (enabled.length === 0) return;
 
-  const settings = buildAdminSettings(await db.getAllSettings(env.DB));
+  const settings = await context.getAdminSettings();
   const notifyNeverReported = settings.offline_notify_never_reported !== 'false';
 
-  const clients = await db.listClients(env.DB);
+  const clients = await context.getClients(enabled.map((item: any) => item.client));
   const clientMap = new Map(clients.map(client => [client.uuid, client]));
-  const latestTimes = await db.getLatestRecordTimes(env.DB);
+  const latestTimes = await db.getLatestRecordTimesForClients(
+    env.DB,
+    enabled.map((item: any) => item.client),
+  );
   const latestMap = new Map(latestTimes.map(row => [row.client, row.last_time]));
 
   for (const item of enabled) {
@@ -305,7 +429,7 @@ async function runOfflineCheck(env: Bindings, now: Date): Promise<void> {
     const message = candidate.neverReported
       ? `CF Monitor 离线告警\n节点: ${client.name || client.uuid}\n离线时间: ${minutes} 分钟\n最后上报: ${candidate.lastSeenLabel}\n创建时间: ${candidate.createdAt}`
       : `CF Monitor 离线告警\n节点: ${client.name || client.uuid}\n离线时间: ${minutes} 分钟\n最后上报: ${candidate.lastSeenLabel}`;
-    const sent = await sendTelegram(env, message);
+    const sent = await sendTelegram(env, context, message);
     await db.markOfflineNotificationSent(env.DB, item.client, now.toISOString());
     await db.insertAuditLog(env.DB, 'system', 'offline_notify', `${sent ? '已发送' : '已记录'}离线告警: ${client.name || client.uuid}${candidate.neverReported ? ' (从未上报)' : ''}`);
   }
@@ -335,12 +459,12 @@ export function shouldSendExpiryNotification(args: {
   };
 }
 
-async function runExpiryCheck(env: Bindings, now: Date): Promise<void> {
+async function runExpiryCheck(env: Bindings, context: ScheduledRunContext, now: Date): Promise<void> {
   const notifications = await db.listExpiryNotifications(env.DB);
   const enabled = notifications.filter((item: any) => item.enable);
   if (enabled.length === 0) return;
 
-  const clients = await db.listClients(env.DB);
+  const clients = await context.getClients(enabled.map((item: any) => item.client));
   const clientMap = new Map(clients.map(client => [client.uuid, client]));
 
   for (const item of enabled) {
@@ -356,64 +480,62 @@ async function runExpiryCheck(env: Bindings, now: Date): Promise<void> {
     if (!candidate) continue;
 
     const message = `CF Monitor 到期提醒\n节点: ${client.name || client.uuid}\n到期时间: ${candidate.expiredAt}\n剩余天数: ${candidate.daysLeft} 天`;
-    const sent = await sendTelegram(env, message);
+    const sent = await sendTelegram(env, context, message);
     await db.markExpiryNotificationSent(env.DB, item.client, now.toISOString());
     await db.insertAuditLog(env.DB, 'system', 'expiry_notify', `${sent ? '已发送' : '已记录'}到期提醒: ${client.name || client.uuid} - ${candidate.daysLeft} 天`);
   }
 }
 
-async function runLoadCheck(env: Bindings, now: Date): Promise<void> {
+async function runLoadCheck(env: Bindings, context: ScheduledRunContext, now: Date): Promise<void> {
   const notifications = await db.listLoadNotifications(env.DB);
   if (notifications.length === 0) return;
 
-  const clients = await db.listClients(env.DB);
+  const hasAllClientRule = notifications.some(rule => !(rule.clients && Array.isArray(rule.clients) && rule.clients.length > 0));
+  const scheduledClientIds = hasAllClientRule
+    ? undefined
+    : notifications.flatMap(rule => Array.isArray(rule.clients) ? rule.clients : []);
+  const clients = await context.getClients(scheduledClientIds);
   const clientMap = new Map(clients.map(c => [c.uuid, c]));
 
   for (const rule of notifications) {
     const intervalMs = Math.max(1, Number(rule.interval_min || 15)) * 60 * 1000;
     const startTime = new Date(now.getTime() - intervalMs).toISOString();
     const endTime = now.toISOString();
-    const targetClients = (rule.clients && Array.isArray(rule.clients) && rule.clients.length > 0)
-      ? rule.clients
-      : clients.map(c => c.uuid);
+    const threshold = Number(rule.threshold || 80);
+    const ratio = Math.max(0, Math.min(1, Number(rule.ratio || 0.8)));
+    const metric = ['cpu', 'ram', 'load', 'disk', 'temp'].includes(rule.metric)
+      ? rule.metric as db.LoadNotificationMetric
+      : 'cpu';
+    const metricLabel: Record<string, string> = { cpu: "CPU", ram: "内存", load: "负载", disk: "磁盘", temp: "温度" };
+    const label = metricLabel[metric] || metric;
+    const lastNotified = rule.last_notified ? new Date(rule.last_notified).getTime() : 0;
+    if (lastNotified && now.getTime() - lastNotified < intervalMs) continue;
 
-    for (const clientUuid of targetClients) {
+    const targetClients: string[] = (rule.clients && Array.isArray(rule.clients) && rule.clients.length > 0)
+      ? rule.clients.filter((uuid: unknown): uuid is string => typeof uuid === 'string' && uuid.trim() !== '')
+      : clients.map(c => c.uuid);
+    const uniqueTargetClients = [...new Set(targetClients)];
+    const statsByClient = await db.getLoadMetricWindowStatsForClients(
+      env.DB,
+      uniqueTargetClients,
+      startTime,
+      endTime,
+      metric,
+      threshold,
+    );
+
+    for (const clientUuid of uniqueTargetClients) {
       const client = clientMap.get(clientUuid);
       if (!client) continue;
 
-      // 获取该客户端在监测窗口内的记录
-      const records = await db.getRecordsByTimeRange(env.DB, clientUuid, startTime, endTime);
-      if (records.length < 2) continue;
+      const stats = statsByClient.get(clientUuid) || { samples: 0, exceeded: 0, avg_value: 0 };
+      if (stats.samples < 2) continue;
 
-      // 根据指标名获取对应的字段值
-      const getValue = (r: any): number => {
-        switch (rule.metric) {
-          case 'cpu': return r.cpu || 0;
-          case 'ram': return r.ram_total > 0 ? (r.ram / r.ram_total) * 100 : 0;
-          case 'load': return r.load || 0;
-          case 'disk': return r.disk_total > 0 ? (r.disk / r.disk_total) * 100 : 0;
-          case 'temp': return r.temp || 0;
-          default: return r.cpu || 0;
-        }
-      };
-
-      const threshold = Number(rule.threshold || 80);
-      const ratio = Math.max(0, Math.min(1, Number(rule.ratio || 0.8)));
-      const exceedCount = records.filter(r => getValue(r) >= threshold).length;
-      const exceedRatio = exceedCount / records.length;
-
+      const exceedRatio = stats.exceeded / stats.samples;
       if (exceedRatio < ratio) continue;
 
-      // 检查是否满足冷却期
-      const lastNotified = rule.last_notified ? new Date(rule.last_notified).getTime() : 0;
-      if (lastNotified && now.getTime() - lastNotified < intervalMs) continue;
-
-      const metricLabel: Record<string, string> = { cpu: "CPU", ram: "内存", load: "负载", disk: "磁盘", temp: "温度" };
-      const label = metricLabel[rule.metric] || rule.metric;
-      const avgValue = records.reduce((s, r) => s + getValue(r), 0) / records.length;
-
-      const message = `CF Monitor 负载告警\n规则: ${rule.name || label + " 告警"}\n节点: ${client.name || clientUuid}\n指标: ${label} 平均 ${avgValue.toFixed(1)}% (阈值 ${threshold}%)\n超标率: ${(exceedRatio * 100).toFixed(0)}% / ${(ratio * 100).toFixed(0)}%`;
-      const sent = await sendTelegram(env, message);
+      const message = `CF Monitor 负载告警\n规则: ${rule.name || label + " 告警"}\n节点: ${client.name || clientUuid}\n指标: ${label} 平均 ${stats.avg_value.toFixed(1)}% (阈值 ${threshold}%)\n超标率: ${(exceedRatio * 100).toFixed(0)}% / ${(ratio * 100).toFixed(0)}%`;
+      const sent = await sendTelegram(env, context, message);
 
       // 记录负载通知冷却时间。
       await db.updateLoadNotification(env.DB, rule.id, { last_notified: now.toISOString() } as any);
@@ -433,7 +555,9 @@ async function runScheduledStep(
 ): Promise<void> {
   try {
     await step();
-    await bestEffortRecordHealthEvent(env.DB, component, 'ok', `${label} completed`);
+    await bestEffortRecordHealthEvent(env.DB, component, 'ok', `${label} completed`, {
+      successThrottleMs: 60 * 60 * 1000,
+    });
   } catch (error) {
     const message = errorDetail(error);
     console.error(`[scheduled] ${label} failed:`, message);
@@ -449,10 +573,11 @@ async function runScheduledStep(
 
 async function runScheduled(env: Bindings): Promise<void> {
   const now = new Date();
-  await runScheduledStep(env, 'cron_cleanup', 'cron_cleanup_error', '记录清理', () => runRecordCleanup(env, now));
-  await runScheduledStep(env, 'cron_load', 'cron_load_error', '负载告警检查', () => runLoadCheck(env, now));
-  await runScheduledStep(env, 'cron_offline', 'cron_offline_error', '离线告警检查', () => runOfflineCheck(env, now));
-  await runScheduledStep(env, 'cron_expiry', 'cron_expiry_error', '到期提醒检查', () => runExpiryCheck(env, now));
+  const context = createScheduledRunContext(env);
+  await runScheduledStep(env, 'cron_cleanup', 'cron_cleanup_error', '记录清理', () => runRecordCleanup(env, context, now));
+  await runScheduledStep(env, 'cron_load', 'cron_load_error', '负载告警检查', () => runLoadCheck(env, context, now));
+  await runScheduledStep(env, 'cron_offline', 'cron_offline_error', '离线告警检查', () => runOfflineCheck(env, context, now));
+  await runScheduledStep(env, 'cron_expiry', 'cron_expiry_error', '到期提醒检查', () => runExpiryCheck(env, context, now));
 }
 
 export default {
