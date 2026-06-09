@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildAgentInstallCommand,
+  buildAgentUninstallAllCommand,
   cfMonitorAgentBinaryUrl,
   defaultAgentInstallOptions,
   cfMonitorAgentScriptUrl,
@@ -19,6 +20,7 @@ describe('CF Monitor agent install command', () => {
     expect(command).toContain('/agent/install-linux.sh');
     expect(command).toContain('raw.githubusercontent.com/kadidalax/cf-monitor');
     expect(command).toContain("'--server' 'https://worker.example.com' '--token' 'node-token'");
+    expect(command).toContain("'--instance-id' 'node-token'");
     expect(command).not.toContain("'--binary-url'");
     expect(command).not.toContain('cf-monitor-agent-linux-amd64');
     expect(command).not.toContain('komari-monitor/komari-agent');
@@ -38,7 +40,25 @@ describe('CF Monitor agent install command', () => {
     expect(command).toContain('raw.githubusercontent.com/kadidalax/cf-monitor');
     expect(command).not.toContain('cf-monitor-agent-windows-amd64.exe');
     expect(command).toContain("'-Server' 'https://worker.example.com' '-Token' 'node-token'");
+    expect(command).toContain("'-InstanceId' 'node-token'");
     expect(command).not.toContain('komari-monitor/komari-agent');
+  });
+
+  it('uses explicit service and install directory when provided instead of derived instance defaults', () => {
+    const command = buildAgentInstallCommand({
+      platform: 'linux',
+      serverUrl: 'https://worker.example.com',
+      token: 'node-token',
+      options: {
+        ...defaultAgentInstallOptions,
+        dir: '/opt/custom-agent',
+        serviceName: 'custom-agent',
+      },
+    });
+
+    expect(command).toContain("'--install-dir' '/opt/custom-agent'");
+    expect(command).toContain("'--service-name' 'custom-agent'");
+    expect(command).not.toContain("'--instance-id'");
   });
 
   it('passes installer-only options through to this project installer', () => {
@@ -134,5 +154,17 @@ describe('CF Monitor agent install command', () => {
   it('normalizes custom server domains for agent endpoint args', () => {
     expect(normalizeServerUrl('monitor.example.com/', 'https://fallback.example.com')).toBe('https://monitor.example.com');
     expect(normalizeServerUrl('', 'https://fallback.example.com/')).toBe('https://fallback.example.com');
+  });
+
+  it('builds a destructive uninstall-all command for Linux agents', () => {
+    const command = buildAgentUninstallAllCommand({
+      platform: 'linux',
+      ghproxy: 'https://ghproxy.example',
+    });
+
+    expect(command).toContain('/agent/install-linux.sh');
+    expect(command).toContain("'--uninstall-all'");
+    expect(command).toContain("'--yes'");
+    expect(command).toContain("'--install-ghproxy' 'https://ghproxy.example'");
   });
 });

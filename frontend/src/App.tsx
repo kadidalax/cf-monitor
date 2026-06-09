@@ -45,9 +45,9 @@ export default function App() {
 
                 <Route path="/login" element={<Login />} />
 
-                <Route path="/admin" element={<AdminLayout />}>
-                  <Route index element={<LiveDataRoute><AdminDashboard /></LiveDataRoute>} />
-                  <Route path="clients" element={<AdminClients />} />
+                  <Route path="/admin" element={<AdminLayout />}>
+                    <Route index element={<LiveDataRoute><AdminDashboard /></LiveDataRoute>} />
+                  <Route path="clients" element={<LiveDataRoute><AdminClients /></LiveDataRoute>} />
                   <Route path="settings" element={<SettingsLayout />}>
                     <Route index element={<SettingsSite />} />
                     <Route path="site" element={<SettingsSite />} />

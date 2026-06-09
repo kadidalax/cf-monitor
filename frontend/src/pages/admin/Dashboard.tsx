@@ -44,6 +44,7 @@ import {
   AgentInstallOptions,
   AgentInstallPlatform,
   buildAgentInstallCommand,
+  buildAgentUninstallAllCommand,
   defaultAgentInstallOptions,
   normalizeServerUrl,
 } from '../../utils/agentInstallCommand';
@@ -256,6 +257,11 @@ function GenerateCommandDialog({ client, open, onOpenChange }: { client: AdminCl
     serverUrl: normalizedServerUrl,
     token: client.token,
     options: installOptions,
+    instanceId: client.uuid,
+  });
+  const uninstallAllCmd = buildAgentUninstallAllCommand({
+    platform,
+    ghproxy: installOptions.ghproxy,
   });
 
   return (
@@ -287,6 +293,9 @@ function GenerateCommandDialog({ client, open, onOpenChange }: { client: AdminCl
 
         <Box style={{ background: 'var(--gray-3)', borderRadius: 8, padding: '12px 16px', fontFamily: 'monospace', fontSize: 12, wordBreak: 'break-all', lineHeight: 1.6, marginTop: 12 }}>{cmd}</Box>
         <Flex justify="end" gap="2" mt="3">
+          <Button color="red" variant="soft" onClick={() => copyToClipboard(uninstallAllCmd, '彻底卸载命令已复制')}>
+            <Trash2 size={14} /> 彻底卸载
+          </Button>
           <Button variant="soft" onClick={() => onOpenChange(false)}>关闭</Button>
           <Button onClick={() => copyToClipboard(cmd, '命令已复制')}><Copy size={14} /> 复制命令</Button>
         </Flex>

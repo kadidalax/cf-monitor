@@ -50,6 +50,40 @@ export function validateOfflineNotificationInput(
   };
 }
 
+export function validateExpiryNotificationInput(
+  input: unknown,
+  allowedClientIds: Set<string>,
+): { ok: true; item: { client: string; enable: boolean; advance_days: number } } | { ok: false; errors: string[] } {
+  const errors: string[] = [];
+  if (!isPlainObject(input)) {
+    return { ok: false, errors: ['到期通知必须是对象'] };
+  }
+
+  const client = stringField(input.client);
+  if (!client || !allowedClientIds.has(client)) {
+    errors.push('客户端不存在或不可用');
+  }
+
+  if (typeof input.enable !== 'boolean') {
+    errors.push('enable 必须是布尔值');
+  }
+
+  const advanceDays = integerField(input.advance_days ?? 7);
+  if (!Number.isInteger(advanceDays) || advanceDays < 1 || advanceDays > 365) {
+    errors.push('advance_days 必须是 1 到 365 天之间的整数');
+  }
+
+  if (errors.length > 0) return { ok: false, errors };
+  return {
+    ok: true,
+    item: {
+      client,
+      enable: Boolean(input.enable),
+      advance_days: advanceDays,
+    },
+  };
+}
+
 export function validateLoadNotificationInput(
   input: unknown,
   allowedClientIds: Set<string>,

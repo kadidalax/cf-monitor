@@ -18,6 +18,7 @@ describe('admin menu', () => {
     expect(labels).toContain('通知设置');
     expect(labels).toContain('通用设置');
     expect(labels).toContain('离线通知');
+    expect(labels).toContain('到期通知');
     expect(labels).toContain('负载通知');
     expect(labels).toContain('延迟监测');
     expect(labels).toContain('审计日志');
@@ -35,6 +36,13 @@ describe('admin menu', () => {
   it('maps legacy notification URLs to the notification section', () => {
     expect(isAdminMenuPathActive('/admin/notifications', '/admin/notification/offline')).toBe(true);
     expect(getAdminSectionTitle('/admin/notification/load')).toBe('负载通知');
+    expect(isAdminChildPathActive('/admin/notifications/expiry', '/admin/notification/expiry')).toBe(true);
+    expect(getAdminSectionTitle('/admin/notification/expiry')).toBe('到期通知');
+  });
+
+  it('maps the legacy clients URL to the server section', () => {
+    expect(isAdminMenuPathActive('/admin', '/admin/clients')).toBe(true);
+    expect(getAdminSectionTitle('/admin/clients')).toBe('服务器');
   });
 
   it('keeps settings child highlighting exact between site and general settings', () => {

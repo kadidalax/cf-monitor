@@ -19,6 +19,7 @@ const migrations = [
   '006_ping_task_sort_order.sql',
   '007_client_sort_order.sql',
   '008_record_high_watermark.sql',
+  '009_expiry_notifications.sql',
 ];
 
 function wranglerArgs(extraArgs) {

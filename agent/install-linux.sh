@@ -7,14 +7,17 @@ NODE_NAME="$(hostname)"
 INTERVAL="3"
 PING_INTERVAL="30"
 MODE="websocket"
-INSTALL_DIR="/opt/cf-monitor"
-SERVICE_NAME="cf-monitor-agent"
+INSTALL_DIR=""
+SERVICE_NAME=""
+INSTANCE_ID=""
 SOURCE_URL=""
 BUILD_FROM_SOURCE="0"
 BINARY=""
 BINARY_URL=""
 DRY_RUN="0"
 UNINSTALL="0"
+UNINSTALL_ALL="0"
+YES="0"
 KEEP_FILES="0"
 INSTALL_GHPROXY=""
 PROXY=""
@@ -42,8 +45,9 @@ Options:
   --interval SECONDS        Report interval, default: 3.
   --ping-interval SECONDS   Ping task poll interval, default: 30.
   --mode MODE               websocket or http, default: websocket.
-  --install-dir DIR         Install directory, default: /opt/cf-monitor.
-  --service-name NAME       systemd service name, default: cf-monitor-agent.
+  --instance-id ID          Instance id used for default service and install directory.
+  --install-dir DIR         Install directory, default: /opt/cf-monitor/<instance-id>.
+  --service-name NAME       systemd service name, default: cf-monitor-agent-<instance-id>.
   --install-service-name NAME
                             Komari-compatible alias for --service-name.
   --binary PATH             Existing agent binary.
@@ -61,6 +65,8 @@ Options:
   --install-ghproxy URL     Accepted for Komari option compatibility.
   --dry-run                 Print actions without changing the system.
   --uninstall               Stop and remove the systemd service and env file.
+  --uninstall-all           Stop all cf-monitor-agent* services and remove all installed agent files.
+  --yes                     Confirm destructive --uninstall-all.
   --keep-files              With --uninstall, keep the install directory.
   -h, --help                Show help.
 EOF
@@ -205,6 +211,48 @@ default_binary_url() {
   printf '%s/%s' "$CF_MONITOR_RELEASE_BASE" "$filename"
 }
 
+sanitize_instance_id() {
+  local raw="${1:-}"
+  local cleaned
+  cleaned="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_.-]+/-/g; s/^-+//; s/-+$//')"
+  if [[ -z "$cleaned" ]]; then
+    cleaned="default"
+  fi
+  printf '%s' "${cleaned:0:48}"
+}
+
+apply_instance_defaults() {
+  local base
+  base="$(sanitize_instance_id "${INSTANCE_ID:-${TOKEN:-default}}")"
+  if [[ -z "$SERVICE_NAME" ]]; then
+    SERVICE_NAME="cf-monitor-agent-${base}"
+  fi
+  if [[ -z "$INSTALL_DIR" ]]; then
+    INSTALL_DIR="/opt/cf-monitor/${base}"
+  fi
+}
+
+uninstall_all_agents() {
+  if [[ "$YES" != "1" ]]; then
+    echo "--uninstall-all requires --yes because it removes every cf-monitor-agent service and /opt/cf-monitor." >&2
+    exit 1
+  fi
+
+  local unit
+  for unit in /etc/systemd/system/cf-monitor-agent*.service; do
+    [[ -e "$unit" ]] || continue
+    run systemctl disable --now "$(basename "$unit")" || true
+  done
+
+  run rm -f /etc/systemd/system/cf-monitor-agent*.service
+  run rm -f /etc/cf-monitor-agent*.env
+  if [[ "$KEEP_FILES" != "1" ]]; then
+    run rm -rf /opt/cf-monitor
+  fi
+  run systemctl daemon-reload
+  echo "Uninstalled all CF Monitor agent services and files."
+}
+
 write_file() {
   local path="$1"
   local mode="$2"
@@ -225,6 +273,7 @@ while [[ $# -gt 0 ]]; do
     --interval) INTERVAL="${2:-}"; shift 2 ;;
     --ping-interval) PING_INTERVAL="${2:-}"; shift 2 ;;
     --mode) MODE="${2:-}"; shift 2 ;;
+    --instance-id) INSTANCE_ID="${2:-}"; shift 2 ;;
     --install-dir) INSTALL_DIR="${2:-}"; shift 2 ;;
     --service-name|--install-service-name) SERVICE_NAME="${2:-}"; shift 2 ;;
     --build-from-source) BUILD_FROM_SOURCE="1"; shift ;;
@@ -242,6 +291,8 @@ while [[ $# -gt 0 ]]; do
     --install-ghproxy) INSTALL_GHPROXY="${2:-}"; shift 2 ;;
     --dry-run) DRY_RUN="1"; shift ;;
     --uninstall) UNINSTALL="1"; shift ;;
+    --uninstall-all) UNINSTALL_ALL="1"; shift ;;
+    --yes|-y) YES="1"; shift ;;
     --keep-files) KEEP_FILES="1"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
@@ -257,6 +308,13 @@ if [[ "$DRY_RUN" != "1" ]] && ! command -v systemctl >/dev/null 2>&1; then
   echo "systemd is required for this installer." >&2
   exit 1
 fi
+
+if [[ "$UNINSTALL_ALL" == "1" ]]; then
+  uninstall_all_agents
+  exit 0
+fi
+
+apply_instance_defaults
 
 if [[ -z "$SERVICE_NAME" ]]; then
   echo "--service-name cannot be empty." >&2

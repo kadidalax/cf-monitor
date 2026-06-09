@@ -179,6 +179,9 @@ export default function NodeCard({ client, live, online }: NodeCardProps) {
   const osConfig = getOSDisplay(client.os || '');
   const trafficLimitLabel = formatTrafficLimitLabel(client.traffic_limit, client.traffic_limit_type);
   const uptimeLabel = online && d.uptime > 0 ? formatUptime(d.uptime) : '-';
+  const cpuCoreLabel = client.cpu_cores > 0 ? `${client.cpu_cores}核` : '-';
+  const memDetail = `${formatBytes(d.ram)} / ${formatBytes(memTotal)}`;
+  const diskDetail = `${formatBytes(d.disk)} / ${formatBytes(diskTotal)}`;
 
   const trafficUsed = (() => {
     if (!client.traffic_limit || client.traffic_limit <= 0) return 0;
@@ -218,20 +221,21 @@ export default function NodeCard({ client, live, online }: NodeCardProps) {
                   <Text weight="bold" size={isMobile ? '2' : '4'} truncate style={{ maxWidth: '100%' }}>
                     {client.name}
                   </Text>
+                  <span className="node-card-billing-slot" aria-hidden={client.price === 0 && !client.expired_at}>
+                    <PriceTags
+                      price={client.price}
+                      billing_cycle={client.billing_cycle}
+                      expired_at={client.expired_at}
+                      currency={client.currency}
+                      showTags={false}
+                    />
+                  </span>
                 </Flex>
                 {isMobile && online && d.uptime > 0 && (
                   <Text color="gray" style={{ marginTop: '-3px', fontSize: '0.728rem' }}>
                     {formatUptime(d.uptime)}
                   </Text>
                 )}
-                <PriceTags
-                  hidden={isMobile}
-                  price={client.price}
-                  billing_cycle={client.billing_cycle}
-                  expired_at={client.expired_at}
-                  currency={client.currency}
-                  showTags={false}
-                />
                 <Flex className="node-card-komari-title-meta" align="center" gap="2">
                   <span className="node-os-chip">
                     <img src={osConfig.image} alt="" aria-hidden="true" />
@@ -290,12 +294,12 @@ export default function NodeCard({ client, live, online }: NodeCardProps) {
             <div className="node-card-next-layout" data-monitor-layout="next">
               <div className="node-metric-grid">
                 <CompactMetric label="CPU" value={formatPercent(cpuPct)} detail="处理器" percent={cpuPct} />
-                <CompactMetric label="内存" value={formatPercent(memPct)} detail={`${formatBytes(d.ram)} / ${formatBytes(memTotal)}`} percent={memPct} />
-                <CompactMetric label="磁盘" value={formatPercent(diskPct)} detail={`${formatBytes(d.disk)} / ${formatBytes(diskTotal)}`} percent={diskPct} />
+                <CompactMetric label="内存" value={formatPercent(memPct)} detail={memDetail} percent={memPct} />
+                <CompactMetric label="磁盘" value={formatPercent(diskPct)} detail={diskDetail} percent={diskPct} />
                 <CompactMetric
-                  label={trafficLimitLabel ? '月度' : '连接'}
-                  value={trafficLimitLabel ? `${trafficPct?.toFixed(0) || 0}%` : String(connectionCount)}
-                  detail={trafficLimitLabel || `TCP ${d.connections || 0} / UDP ${d.connections_udp || 0}`}
+                  label="月度"
+                  value={trafficLimitLabel ? `${trafficPct?.toFixed(0) || 0}%` : '-'}
+                  detail={trafficLimitLabel || '未设置'}
                   percent={trafficLimitLabel ? trafficPct : undefined}
                 />
               </div>
@@ -309,9 +313,9 @@ export default function NodeCard({ client, live, online }: NodeCardProps) {
 
             <div className="node-card-monitor-layout" data-monitor-layout="monitor">
               <div className="node-resource-ring-grid">
-                <RingMetric label="CPU" percent={cpuPct} detail={formatPercent(cpuPct)} />
-                <RingMetric label="RAM" percent={memPct} detail={formatBytes(d.ram)} />
-                <RingMetric label="Disk" percent={diskPct} detail={formatBytes(d.disk)} />
+                <RingMetric label="CPU" percent={cpuPct} detail={cpuCoreLabel} />
+                <RingMetric label="RAM" percent={memPct} detail={memDetail} />
+                <RingMetric label="Disk" percent={diskPct} detail={diskDetail} />
               </div>
 
               <NetworkSummary

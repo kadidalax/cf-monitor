@@ -213,10 +213,9 @@ clientRoutes.post('/uploadBasicInfo', clientAuth, async (c) => {
     const newIpv6 = nonEmptyString(body.ipv6, oldIpv6);
     const inferredIpv4 = !newIpv4 && fallbackIp && !isIPv6(fallbackIp) ? fallbackIp : newIpv4;
     const inferredIpv6 = !newIpv6 && fallbackIp && isIPv6(fallbackIp) ? fallbackIp : newIpv6;
-    const newName = nonEmptyString(body.name, oldClient?.name || c.get('clientName') || uuid);
+    const displayName = oldClient?.name || c.get('clientName') || uuid;
 
     await db.updateClient(c.env.DB, uuid, {
-      name: newName,
       cpu_name: nonEmptyString(body.cpu_name, oldClient?.cpu_name || ''),
       virtualization: nonEmptyString(body.virtualization, oldClient?.virtualization || ''),
       arch: nonEmptyString(body.arch, oldClient?.arch || ''),
@@ -235,7 +234,7 @@ clientRoutes.post('/uploadBasicInfo', clientAuth, async (c) => {
 
     await recordIpChangeIfEnabled(
       c,
-      newName,
+      displayName,
       ipChangeParts(oldIpv4, oldIpv6, inferredIpv4, inferredIpv6),
     );
 

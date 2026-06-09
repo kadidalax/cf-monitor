@@ -75,6 +75,10 @@ export default function AdminLayout() {
     window.open(githubUrl, "_blank", "noopener,noreferrer");
   };
 
+  const openPublicSite = () => {
+    window.open("/", "_blank", "noopener,noreferrer");
+  };
+
   const themeIcon =
     theme === "dark" ? <Moon size={18} /> : theme === "light" ? <Sun size={18} /> : <Laptop size={18} />;
   const nextDisplayTheme = displayTheme === "monitor" ? "next" : "monitor";
@@ -183,7 +187,7 @@ export default function AdminLayout() {
 
         <div className="admin-sidebar-footer">
           <Flex px="4" py="3" direction="column" gap="2">
-            <Button className="admin-sidebar-action" variant="soft" size="2" onClick={() => navigate("/")} style={{ width: "100%" }}>
+            <Button className="admin-sidebar-action" variant="soft" size="2" onClick={openPublicSite} style={{ width: "100%" }}>
               <Home size={14} /> 返回前台
             </Button>
             <Button className="admin-sidebar-action" variant="soft" size="2" onClick={handleLogout} color="red" style={{ width: "100%" }}>

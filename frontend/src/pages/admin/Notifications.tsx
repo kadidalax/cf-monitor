@@ -4,7 +4,7 @@ import {
   Dialog, Badge, Switch, Table, Tabs, Select,
   Box, Checkbox,
 } from '@radix-ui/themes';
-import { Plus, Pencil, Trash2, Search, Send, Save, Unplug, TrendingUp, Bell } from 'lucide-react';
+import { Plus, Pencil, Trash2, Search, Send, Save, Unplug, TrendingUp, Bell, CalendarClock } from 'lucide-react';
 import { useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
@@ -17,6 +17,7 @@ export default function AdminNotifications() {
   const [activeTab, setActiveTab] = useState(urlTab || 'offline');
   const [loading, setLoading] = useState(true);
   const [offlineNotifications, setOfflineNotifications] = useState<any[]>([]);
+  const [expiryNotifications, setExpiryNotifications] = useState<any[]>([]);
   const [clients, setClients] = useState<any[]>([]);
   const [loadNotifications, setLoadNotifications] = useState<any[]>([]);
   const [settings, setSettings] = useState<Record<string, string>>({});
@@ -30,6 +31,11 @@ export default function AdminNotifications() {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [editingOffline, setEditingOffline] = useState<any>(null);
   const [editForm, setEditForm] = useState({ enable: false, grace_period: 180 });
+  const [expiryBatchDialogOpen, setExpiryBatchDialogOpen] = useState(false);
+  const [expiryBatchForm, setExpiryBatchForm] = useState({ enable: true, advance_days: 7 });
+  const [expiryEditDialogOpen, setExpiryEditDialogOpen] = useState(false);
+  const [editingExpiry, setEditingExpiry] = useState<any>(null);
+  const [expiryEditForm, setExpiryEditForm] = useState({ enable: false, advance_days: 7 });
 
   // Load tab state
   const [loadDialogOpen, setLoadDialogOpen] = useState(false);
@@ -37,17 +43,19 @@ export default function AdminNotifications() {
   const [loadForm, setLoadForm] = useState<Record<string, any>>({});
 
   useEffect(() => {
-    if (urlTab === 'settings' || urlTab === 'offline' || urlTab === 'load') setActiveTab(urlTab);
+    if (urlTab === 'settings' || urlTab === 'offline' || urlTab === 'expiry' || urlTab === 'load') setActiveTab(urlTab);
   }, [urlTab]);
 
   const loadData = async () => {
-    const [offData, loadData, clientsData, settingsData] = await Promise.all([
+    const [offData, expiryData, loadData, clientsData, settingsData] = await Promise.all([
       apiFetch('/admin/notification/offline'),
+      apiFetch('/admin/notification/expiry'),
       apiFetch('/admin/notification/load'),
       apiFetch('/admin/clients'),
       apiFetch('/admin/settings'),
     ]);
     if (Array.isArray(offData)) setOfflineNotifications(offData);
+    if (Array.isArray(expiryData)) setExpiryNotifications(expiryData);
     if (Array.isArray(loadData)) setLoadNotifications(loadData.map((item: any) => ({
       ...item,
       clients: Array.isArray(item.clients) ? item.clients : [],
@@ -65,6 +73,12 @@ export default function AdminNotifications() {
     offlineNotifications.forEach((n: any) => map.set(n.client, n));
     return map;
   }, [offlineNotifications]);
+
+  const expiryNotificationMap = useMemo(() => {
+    const map = new Map<string, any>();
+    expiryNotifications.forEach((n: any) => map.set(n.client, n));
+    return map;
+  }, [expiryNotifications]);
 
   const filteredClients = useMemo(() => {
     if (!searchTerm.trim()) return clients;
@@ -155,6 +169,78 @@ export default function AdminNotifications() {
       setSelectedClients([]);
     } else {
       setSelectedClients(filteredClients.map((c) => c.uuid));
+    }
+  };
+
+  const toggleExpiry = async (clientUuid: string, enable: boolean) => {
+    const existing = expiryNotificationMap.get(clientUuid);
+    const result = await apiFetch('/admin/notification/expiry/edit', {
+      method: 'POST',
+      body: JSON.stringify({ client: clientUuid, enable, advance_days: existing?.advance_days || 7 }),
+    });
+    if (result.success) {
+      toast.success(enable ? '已开启到期通知' : '已关闭到期通知');
+      loadData();
+    } else {
+      toast.error('操作失败');
+    }
+  };
+
+  const openExpiryEditDialog = (clientUuid: string) => {
+    const existing = expiryNotificationMap.get(clientUuid);
+    setEditingExpiry(clientUuid);
+    setExpiryEditForm({
+      enable: existing?.enable || false,
+      advance_days: existing?.advance_days || 7,
+    });
+    setExpiryEditDialogOpen(true);
+  };
+
+  const saveExpirySingleEdit = async () => {
+    if (!editingExpiry) return;
+    const result = await apiFetch('/admin/notification/expiry/edit', {
+      method: 'POST',
+      body: JSON.stringify({
+        client: editingExpiry,
+        enable: expiryEditForm.enable,
+        advance_days: expiryEditForm.advance_days,
+      }),
+    });
+    if (result.success) {
+      toast.success('已更新');
+      setExpiryEditDialogOpen(false);
+      loadData();
+    } else {
+      toast.error('更新失败');
+    }
+  };
+
+  const openExpiryBatchDialog = () => {
+    if (selectedClients.length === 0) {
+      toast.error('请先选择服务器');
+      return;
+    }
+    setExpiryBatchForm({ enable: true, advance_days: 7 });
+    setExpiryBatchDialogOpen(true);
+  };
+
+  const saveExpiryBatchEdit = async () => {
+    const payload = selectedClients.map((uuid) => ({
+      client: uuid,
+      enable: expiryBatchForm.enable,
+      advance_days: expiryBatchForm.advance_days,
+    }));
+    const result = await apiFetch('/admin/notification/expiry/edit', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    if (result.success) {
+      toast.success(`已批量更新 ${selectedClients.length} 个节点`);
+      setExpiryBatchDialogOpen(false);
+      setSelectedClients([]);
+      loadData();
+    } else {
+      toast.error('批量更新失败');
     }
   };
 
@@ -271,6 +357,7 @@ export default function AdminNotifications() {
   if (loading) return <Loading />;
 
   const offlineStatsCount = offlineNotifications.filter((n: any) => n.enable).length;
+  const expiryStatsCount = expiryNotifications.filter((n: any) => n.enable).length;
   const headerAction = activeTab === 'settings' ? (
     <Button onClick={saveNotificationSettings} disabled={settingsSaving}>
       <Save size={14} /> {settingsSaving ? '保存中...' : '保存设置'}
@@ -279,6 +366,14 @@ export default function AdminNotifications() {
     <Button
       variant="soft"
       onClick={openBatchDialog}
+      disabled={selectedClients.length === 0}
+    >
+      <Pencil size={14} /> 批量编辑 ({selectedClients.length})
+    </Button>
+  ) : activeTab === 'expiry' ? (
+    <Button
+      variant="soft"
+      onClick={openExpiryBatchDialog}
       disabled={selectedClients.length === 0}
     >
       <Pencil size={14} /> 批量编辑 ({selectedClients.length})
@@ -304,6 +399,9 @@ export default function AdminNotifications() {
             </Tabs.Trigger>
             <Tabs.Trigger value="offline">
               <Unplug size={14} /> 离线通知 ({offlineStatsCount} 开启)
+            </Tabs.Trigger>
+            <Tabs.Trigger value="expiry">
+              <CalendarClock size={14} /> 到期通知 ({expiryStatsCount} 开启)
             </Tabs.Trigger>
             <Tabs.Trigger value="load">
               <TrendingUp size={14} /> 负载通知 ({loadNotifications.length} 条)
@@ -451,6 +549,105 @@ export default function AdminNotifications() {
             )}
           </Tabs.Content>
 
+          {/* ─── Expiry Tab ─── */}
+          <Tabs.Content value="expiry">
+            <Flex justify="between" align="center" mb="3" gap="2" wrap="wrap">
+              <TextField.Root
+                style={{ width: 280 }}
+                placeholder="搜索服务器名称、IP、地区..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+              >
+                <TextField.Slot><Search size={14} /></TextField.Slot>
+              </TextField.Root>
+            </Flex>
+
+            {filteredClients.length === 0 ? (
+              <Flex justify="center" py="6">
+                <Text color="gray">暂无匹配的服务器</Text>
+              </Flex>
+            ) : (
+              <div style={{ maxHeight: 'calc(100vh - 320px)', overflow: 'auto' }}>
+              <Table.Root variant="surface">
+                <Table.Header>
+                  <Table.Row>
+                    <Table.ColumnHeaderCell width="40px">
+                      <Checkbox
+                        checked={selectedClients.length === filteredClients.length && filteredClients.length > 0}
+                        onCheckedChange={toggleSelectAll}
+                      />
+                    </Table.ColumnHeaderCell>
+                    <Table.ColumnHeaderCell>服务器</Table.ColumnHeaderCell>
+                    <Table.ColumnHeaderCell width="80px">状态</Table.ColumnHeaderCell>
+                    <Table.ColumnHeaderCell width="110px">提前天数</Table.ColumnHeaderCell>
+                    <Table.ColumnHeaderCell width="150px">到期时间</Table.ColumnHeaderCell>
+                    <Table.ColumnHeaderCell width="160px">最后通知</Table.ColumnHeaderCell>
+                    <Table.ColumnHeaderCell width="132px">操作</Table.ColumnHeaderCell>
+                  </Table.Row>
+                </Table.Header>
+                <Table.Body>
+                  {filteredClients.map((client) => {
+                    const notification = expiryNotificationMap.get(client.uuid);
+                    const enabled = notification?.enable || false;
+                    const advanceDays = notification?.advance_days || 7;
+                    const lastNotified = notification?.last_notified;
+                    const lastNotifiedText = lastNotified
+                      ? new Date(lastNotified).getFullYear() < 2000
+                        ? '从未触发'
+                        : new Date(lastNotified).toLocaleString('zh-CN')
+                      : '-';
+                    const expiredAtText = client.expired_at
+                      ? new Date(client.expired_at).toLocaleDateString('zh-CN')
+                      : '未设置';
+
+                    return (
+                      <Table.Row key={client.uuid}>
+                        <Table.Cell>
+                          <Checkbox
+                            checked={selectedClients.includes(client.uuid)}
+                            onCheckedChange={(checked) => {
+                              if (checked) {
+                                setSelectedClients([...selectedClients, client.uuid]);
+                              } else {
+                                setSelectedClients(selectedClients.filter((id) => id !== client.uuid));
+                              }
+                            }}
+                          />
+                        </Table.Cell>
+                        <Table.Cell>
+                          <Text size="2" weight="medium">{client.name || '未命名'}</Text>
+                          {client.ipv4 && <Text size="1" color="gray" ml="2">{client.ipv4}</Text>}
+                        </Table.Cell>
+                        <Table.Cell>
+                          <Switch
+                            size="1"
+                            checked={enabled}
+                            onCheckedChange={(v) => toggleExpiry(client.uuid, v)}
+                          />
+                        </Table.Cell>
+                        <Table.Cell>
+                          <Text size="2">{advanceDays} 天</Text>
+                        </Table.Cell>
+                        <Table.Cell>
+                          <Text size="1" color={client.expired_at ? 'gray' : 'amber'}>{expiredAtText}</Text>
+                        </Table.Cell>
+                        <Table.Cell>
+                          <Text size="1" color="gray">{lastNotifiedText}</Text>
+                        </Table.Cell>
+                        <Table.Cell>
+                          <Button size="1" variant="soft" onClick={() => openExpiryEditDialog(client.uuid)}>
+                            <Pencil size={13} /> 编辑
+                          </Button>
+                        </Table.Cell>
+                      </Table.Row>
+                    );
+                  })}
+                </Table.Body>
+              </Table.Root>
+              </div>
+            )}
+          </Tabs.Content>
+
           {/* ─── Load Tab ─── */}
           <Tabs.Content value="load">
             {loadNotifications.length === 0 ? (
@@ -579,6 +776,79 @@ export default function AdminNotifications() {
           <Flex gap="2" justify="end" mt="4">
             <Button variant="soft" color="gray" onClick={() => setBatchDialogOpen(false)}>取消</Button>
             <Button onClick={saveBatchEdit}>保存 ({selectedClients.length} 节点)</Button>
+          </Flex>
+        </Dialog.Content>
+      </Dialog.Root>
+
+      {/* ─── Expiry Single Edit Dialog ─── */}
+      <Dialog.Root open={expiryEditDialogOpen} onOpenChange={setExpiryEditDialogOpen}>
+        <Dialog.Content style={{ maxWidth: 420 }}>
+          <Dialog.Title>编辑到期通知</Dialog.Title>
+          <Dialog.Description size="2" mb="3">
+            {editingExpiry && (
+              <Text size="2">{clients.find((c) => c.uuid === editingExpiry)?.name || editingExpiry}</Text>
+            )}
+          </Dialog.Description>
+          <Flex direction="column" gap="3">
+            <label>
+              <Text size="2" weight="bold">状态</Text>
+              <Flex mt="1">
+                <Switch checked={expiryEditForm.enable} onCheckedChange={(v) => setExpiryEditForm({ ...expiryEditForm, enable: v })} />
+                <Text size="2" ml="2" color="gray">{expiryEditForm.enable ? '已开启' : '已关闭'}</Text>
+              </Flex>
+            </label>
+            <label>
+              <Text size="2" weight="bold">提前天数</Text>
+              <TextField.Root
+                type="number"
+                min="1"
+                max="365"
+                value={expiryEditForm.advance_days}
+                onChange={(e) => setExpiryEditForm({ ...expiryEditForm, advance_days: Number(e.target.value) })}
+                mt="1"
+              />
+              <Text size="1" color="gray" mt="1">
+                节点到期前进入该天数窗口时发送一次提醒
+              </Text>
+            </label>
+          </Flex>
+          <Flex gap="2" justify="end" mt="4">
+            <Button variant="soft" color="gray" onClick={() => setExpiryEditDialogOpen(false)}>取消</Button>
+            <Button onClick={saveExpirySingleEdit}>保存</Button>
+          </Flex>
+        </Dialog.Content>
+      </Dialog.Root>
+
+      {/* ─── Expiry Batch Edit Dialog ─── */}
+      <Dialog.Root open={expiryBatchDialogOpen} onOpenChange={setExpiryBatchDialogOpen}>
+        <Dialog.Content style={{ maxWidth: 420 }}>
+          <Dialog.Title>批量编辑到期通知</Dialog.Title>
+          <Dialog.Description size="2" mb="3">
+            将为 {selectedClients.length} 个选中节点统一设置到期提醒参数
+          </Dialog.Description>
+          <Flex direction="column" gap="3">
+            <label>
+              <Text size="2" weight="bold">状态</Text>
+              <Flex mt="1">
+                <Switch checked={expiryBatchForm.enable} onCheckedChange={(v) => setExpiryBatchForm({ ...expiryBatchForm, enable: v })} />
+                <Text size="2" ml="2" color="gray">{expiryBatchForm.enable ? '开启' : '关闭'}</Text>
+              </Flex>
+            </label>
+            <label>
+              <Text size="2" weight="bold">提前天数</Text>
+              <TextField.Root
+                type="number"
+                min="1"
+                max="365"
+                value={expiryBatchForm.advance_days}
+                onChange={(e) => setExpiryBatchForm({ ...expiryBatchForm, advance_days: Number(e.target.value) })}
+                mt="1"
+              />
+            </label>
+          </Flex>
+          <Flex gap="2" justify="end" mt="4">
+            <Button variant="soft" color="gray" onClick={() => setExpiryBatchDialogOpen(false)}>取消</Button>
+            <Button onClick={saveExpiryBatchEdit}>保存 ({selectedClients.length} 节点)</Button>
           </Flex>
         </Dialog.Content>
       </Dialog.Root>

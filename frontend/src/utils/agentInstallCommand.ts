@@ -76,17 +76,20 @@ export function buildAgentInstallCommand({
   serverUrl,
   token,
   options,
+  instanceId,
 }: {
   platform: AgentInstallPlatform;
   serverUrl: string;
   token: string;
   options: AgentInstallOptions;
+  instanceId?: string;
 }) {
   const ghproxy = normalizeProxyUrl(options.ghproxy);
   const downloadProxy = normalizeProxyUrl(options.downloadProxy);
   const binaryUrl = options.binaryUrl?.trim();
   const dir = options.dir.trim();
   const serviceName = options.serviceName.trim();
+  const effectiveInstanceId = instanceId?.trim() || token || '<TOKEN>';
   const mountInclude = options.mountInclude.trim();
   const mountExclude = options.mountExclude.trim();
   const nicInclude = options.nicInclude.trim();
@@ -95,6 +98,7 @@ export function buildAgentInstallCommand({
   switch (platform) {
     case 'linux': {
       const args = ['--server', serverUrl, '--token', token || '<TOKEN>'];
+      if (!dir && !serviceName) args.push('--instance-id', effectiveInstanceId);
       if (binaryUrl) args.push('--binary-url', binaryUrl);
       if (ghproxy) args.push('--install-ghproxy', ghproxy);
       if (downloadProxy) args.push('--proxy', downloadProxy);
@@ -108,6 +112,7 @@ export function buildAgentInstallCommand({
     }
     case 'windows': {
       const args = ['-Server', serverUrl, '-Token', token || '<TOKEN>'];
+      if (!dir && !serviceName) args.push('-InstanceId', effectiveInstanceId);
       if (binaryUrl) args.push('-BinaryUrl', binaryUrl);
       if (ghproxy) args.push('-InstallGhproxy', ghproxy);
       if (downloadProxy) args.push('-Proxy', downloadProxy);
@@ -122,6 +127,7 @@ export function buildAgentInstallCommand({
     }
     case 'macos': {
       const args = ['--server', serverUrl, '--token', token || '<TOKEN>'];
+      if (!dir && !serviceName) args.push('--instance-id', effectiveInstanceId);
       if (binaryUrl) args.push('--binary-url', binaryUrl);
       if (ghproxy) args.push('--install-ghproxy', ghproxy);
       if (downloadProxy) args.push('--proxy', downloadProxy);
@@ -135,6 +141,26 @@ export function buildAgentInstallCommand({
     }
     default:
       return '';
+  }
+}
+
+export function buildAgentUninstallAllCommand({
+  platform,
+  ghproxy = '',
+}: {
+  platform: AgentInstallPlatform;
+  ghproxy?: string;
+}) {
+  const proxy = normalizeProxyUrl(ghproxy);
+  switch (platform) {
+    case 'windows':
+      return 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ' +
+        `"iwr ${psQuote(cfMonitorAgentScriptUrl('install-windows.ps1', proxy))} -UseBasicParsing -OutFile 'install-windows.ps1'; & '.\\install-windows.ps1' '-UninstallAll' '-Yes'"`;
+    case 'macos':
+      return `zsh <(curl -sL ${shellQuote(cfMonitorAgentScriptUrl('install-linux.sh', proxy))}) '--uninstall-all' '--yes'${proxy ? ` '--install-ghproxy' ${shellQuote(proxy)}` : ''}`;
+    case 'linux':
+    default:
+      return `wget -qO- ${shellQuote(cfMonitorAgentScriptUrl('install-linux.sh', proxy))} | sudo bash -s -- '--uninstall-all' '--yes'${proxy ? ` '--install-ghproxy' ${shellQuote(proxy)}` : ''}`;
   }
 }
 

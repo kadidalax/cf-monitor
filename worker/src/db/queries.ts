@@ -826,6 +826,46 @@ export async function markOfflineNotificationSent(db: D1Database, client: string
     .bind(time, client).run();
 }
 
+export async function getExpiryNotification(db: D1Database, client: string): Promise<any> {
+  return db.prepare('SELECT * FROM expiry_notifications WHERE client = ?').bind(client).first();
+}
+
+export async function listExpiryNotifications(db: D1Database): Promise<any[]> {
+  const result = await db.prepare('SELECT * FROM expiry_notifications').all();
+  return result.results;
+}
+
+export async function replaceAllExpiryNotifications(db: D1Database, notifications: any[]): Promise<void> {
+  await db.prepare('DELETE FROM expiry_notifications').run();
+  if (notifications.length === 0) return;
+
+  const stmt = db.prepare(`
+    INSERT INTO expiry_notifications (client, enable, advance_days, last_notified)
+    VALUES (?, ?, ?, ?)
+  `);
+
+  await db.batch(
+    notifications.map((item) =>
+      stmt.bind(
+        item.client,
+        item.enable ? 1 : 0,
+        item.advance_days || 7,
+        item.last_notified || null,
+      ),
+    ),
+  );
+}
+
+export async function setExpiryNotification(db: D1Database, client: string, enable: boolean, advanceDays: number): Promise<void> {
+  await db.prepare('INSERT OR REPLACE INTO expiry_notifications (client, enable, advance_days) VALUES (?, ?, ?)')
+    .bind(client, enable ? 1 : 0, advanceDays).run();
+}
+
+export async function markExpiryNotificationSent(db: D1Database, client: string, time: string): Promise<void> {
+  await db.prepare('UPDATE expiry_notifications SET last_notified = ? WHERE client = ?')
+    .bind(time, client).run();
+}
+
 export async function listLoadNotifications(db: D1Database): Promise<any[]> {
   const result = await db.prepare('SELECT * FROM load_notifications').all<any>();
   return result.results.map(row => ({ ...row, clients: JSON.parse(row.clients || '[]') }));
@@ -957,6 +997,7 @@ export interface ClientReferenceCleanupResult {
   ping_tasks_updated: number;
   load_notifications_updated: number;
   load_notifications_deleted: number;
+  expiry_notifications_deleted: number;
 }
 
 export async function pruneClientReferences(db: D1Database, uuid: string): Promise<ClientReferenceCleanupResult> {
@@ -985,10 +1026,13 @@ export async function pruneClientReferences(db: D1Database, uuid: string): Promi
     }
   }
 
+  const expiryNotifications = await db.prepare('DELETE FROM expiry_notifications WHERE client = ?').bind(uuid).run();
+
   return {
     ping_tasks_updated: pingTasksUpdated,
     load_notifications_updated: loadNotificationsUpdated,
     load_notifications_deleted: loadNotificationsDeleted,
+    expiry_notifications_deleted: Number(expiryNotifications.meta.changes || 0),
   };
 }
 
@@ -1032,6 +1076,9 @@ export async function cleanupOrphanClientData(db: D1Database): Promise<OrphanCli
   const offlineNotifications = await db.prepare(
     'DELETE FROM offline_notifications WHERE client NOT IN (SELECT uuid FROM clients)'
   ).run();
+  const expiryNotifications = await db.prepare(
+    'DELETE FROM expiry_notifications WHERE client NOT IN (SELECT uuid FROM clients)'
+  ).run();
   const records = await db.prepare(
     'DELETE FROM records WHERE client NOT IN (SELECT uuid FROM clients)'
   ).run();
@@ -1046,6 +1093,7 @@ export async function cleanupOrphanClientData(db: D1Database): Promise<OrphanCli
     ping_tasks_updated: pingTasksUpdated,
     load_notifications_updated: loadNotificationsUpdated,
     load_notifications_deleted: loadNotificationsDeleted,
+    expiry_notifications_deleted: Number(expiryNotifications.meta.changes || 0),
     offline_notifications_deleted: Number(offlineNotifications.meta.changes || 0),
     records_deleted: Number(records.meta.changes || 0),
     gpu_records_deleted: Number(gpuRecords.meta.changes || 0),
@@ -1146,6 +1194,22 @@ export async function restoreBackupData(db: D1Database, backup: BackupData): Pro
         item.client,
         item.enable ? 1 : 0,
         item.grace_period || 180,
+        item.last_notified || null,
+      ));
+    }
+  }
+
+  if (backup.expiry_notifications !== undefined) {
+    statements.push(db.prepare('DELETE FROM expiry_notifications'));
+    const stmt = db.prepare(`
+      INSERT INTO expiry_notifications (client, enable, advance_days, last_notified)
+      VALUES (?, ?, ?, ?)
+    `);
+    for (const item of backup.expiry_notifications) {
+      statements.push(stmt.bind(
+        item.client,
+        item.enable ? 1 : 0,
+        item.advance_days || 7,
         item.last_notified || null,
       ));
     }

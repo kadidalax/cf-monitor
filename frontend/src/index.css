@@ -534,6 +534,25 @@ body {
   flex-wrap: nowrap;
 }
 
+.node-card-title-row .rt-Text {
+  min-width: 0;
+}
+
+.node-card-billing-slot {
+  min-width: 52px;
+  min-height: 20px;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  margin-left: 2px;
+}
+
+.node-card-billing-slot .rt-Flex {
+  min-height: 20px;
+  align-items: center;
+  flex-wrap: nowrap !important;
+}
+
 .node-card-action {
   width: 26px !important;
   min-width: 26px !important;
@@ -1212,6 +1231,7 @@ html[data-monitor-theme='next'] .node-network-value strong {
   min-height: 38px;
   width: 100%;
   display: flex;
+  align-items: center;
   justify-content: center;
   border: 0;
   border-radius: 0;
@@ -1224,8 +1244,9 @@ html[data-monitor-theme='next'] .node-network-value strong {
   width: max-content;
   max-width: 100%;
   margin-inline: auto;
-  display: inline-grid;
-  grid-template-columns: repeat(4, minmax(168px, max-content));
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
   justify-content: center;
   gap: 6px;
   overflow-x: auto;
@@ -1234,7 +1255,8 @@ html[data-monitor-theme='next'] .node-network-value strong {
 }
 
 .admin-overview-item {
-  min-width: 0;
+  flex: 0 0 auto;
+  min-width: max-content;
   min-height: 44px;
   display: flex;
   align-items: center;
@@ -1448,6 +1470,7 @@ html[data-monitor-theme='next'] .node-network-value strong {
 .admin-overview-line {
   min-width: 0;
   height: 100%;
+  flex-wrap: nowrap !important;
   flex-direction: row !important;
   align-items: center !important;
   justify-content: center;

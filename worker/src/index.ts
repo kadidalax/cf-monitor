@@ -311,6 +311,56 @@ async function runOfflineCheck(env: Bindings, now: Date): Promise<void> {
   }
 }
 
+export function shouldSendExpiryNotification(args: {
+  now: Date;
+  expiredAt: string | null | undefined;
+  advanceDays: number;
+  lastNotified: string | null | undefined;
+}): { daysLeft: number; expiredAt: string } | null {
+  if (!args.expiredAt) return null;
+  const expiryMs = new Date(args.expiredAt).getTime();
+  const nowMs = args.now.getTime();
+  if (Number.isNaN(expiryMs) || expiryMs < nowMs) return null;
+
+  const advanceMs = Math.max(1, Number(args.advanceDays || 7)) * 24 * 60 * 60 * 1000;
+  const windowStartMs = expiryMs - advanceMs;
+  if (nowMs < windowStartMs) return null;
+
+  const lastNotifiedMs = args.lastNotified ? new Date(args.lastNotified).getTime() : 0;
+  if (!Number.isNaN(lastNotifiedMs) && lastNotifiedMs >= windowStartMs) return null;
+
+  return {
+    daysLeft: Math.max(0, Math.ceil((expiryMs - nowMs) / (24 * 60 * 60 * 1000))),
+    expiredAt: new Date(expiryMs).toISOString(),
+  };
+}
+
+async function runExpiryCheck(env: Bindings, now: Date): Promise<void> {
+  const notifications = await db.listExpiryNotifications(env.DB);
+  const enabled = notifications.filter((item: any) => item.enable);
+  if (enabled.length === 0) return;
+
+  const clients = await db.listClients(env.DB);
+  const clientMap = new Map(clients.map(client => [client.uuid, client]));
+
+  for (const item of enabled) {
+    const client = clientMap.get(item.client);
+    if (!client) continue;
+
+    const candidate = shouldSendExpiryNotification({
+      now,
+      expiredAt: client.expired_at,
+      advanceDays: Number(item.advance_days || 7),
+      lastNotified: item.last_notified,
+    });
+    if (!candidate) continue;
+
+    const message = `CF Monitor 到期提醒\n节点: ${client.name || client.uuid}\n到期时间: ${candidate.expiredAt}\n剩余天数: ${candidate.daysLeft} 天`;
+    const sent = await sendTelegram(env, message);
+    await db.markExpiryNotificationSent(env.DB, item.client, now.toISOString());
+    await db.insertAuditLog(env.DB, 'system', 'expiry_notify', `${sent ? '已发送' : '已记录'}到期提醒: ${client.name || client.uuid} - ${candidate.daysLeft} 天`);
+  }
+}
 
 async function runLoadCheck(env: Bindings, now: Date): Promise<void> {
   const notifications = await db.listLoadNotifications(env.DB);
@@ -402,6 +452,7 @@ async function runScheduled(env: Bindings): Promise<void> {
   await runScheduledStep(env, 'cron_cleanup', 'cron_cleanup_error', '记录清理', () => runRecordCleanup(env, now));
   await runScheduledStep(env, 'cron_load', 'cron_load_error', '负载告警检查', () => runLoadCheck(env, now));
   await runScheduledStep(env, 'cron_offline', 'cron_offline_error', '离线告警检查', () => runOfflineCheck(env, now));
+  await runScheduledStep(env, 'cron_expiry', 'cron_expiry_error', '到期提醒检查', () => runExpiryCheck(env, now));
 }
 
 export default {

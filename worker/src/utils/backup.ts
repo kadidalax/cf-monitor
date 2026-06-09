@@ -29,6 +29,7 @@ type BackupModuleKey =
   | 'clients'
   | 'ping_tasks'
   | 'offline_notifications'
+  | 'expiry_notifications'
   | 'load_notifications';
 
 export interface BackupData {
@@ -43,6 +44,7 @@ export interface BackupData {
   clients?: Partial<Client>[];
   ping_tasks?: PingTask[];
   offline_notifications?: any[];
+  expiry_notifications?: any[];
   load_notifications?: any[];
 }
 
@@ -69,6 +71,7 @@ export interface BackupSummary {
   clients: number;
   ping_tasks: number;
   offline_notifications: number;
+  expiry_notifications: number;
   load_notifications: number;
 }
 
@@ -375,6 +378,22 @@ function validateOfflineNotifications(items: unknown[], errors: string[]): any[]
   });
 }
 
+function validateExpiryNotifications(items: unknown[], errors: string[]): any[] {
+  return items.flatMap((item, index) => {
+    if (!isPlainObject(item)) {
+      errors.push(`expiry_notifications[${index}] 必须是对象`);
+      return [];
+    }
+
+    return [{
+      client: textField(item.client, `expiry_notifications[${index}].client`, errors, { required: true, maxLength: 128 }) || '',
+      enable: booleanField(item.enable),
+      advance_days: integerField(item.advance_days, `expiry_notifications[${index}].advance_days`, errors, 7, 1, 365),
+      last_notified: optionalTimeField(item.last_notified, `expiry_notifications[${index}].last_notified`, errors),
+    }];
+  });
+}
+
 function validateLoadNotifications(items: unknown[], errors: string[]): any[] {
   const metrics = new Set(['cpu', 'ram', 'load', 'disk', 'temp']);
   return items.flatMap((item, index) => {
@@ -467,6 +486,12 @@ export function validateBackup(input: unknown): BackupValidationResult {
   const offlineNotifications = requireArray(input, 'offline_notifications', MAX_NOTIFICATIONS, errors);
   if (offlineNotifications) {
     backup.offline_notifications = validateOfflineNotifications(offlineNotifications, errors);
+    hasModule = true;
+  }
+
+  const expiryNotifications = requireArray(input, 'expiry_notifications', MAX_NOTIFICATIONS, errors);
+  if (expiryNotifications) {
+    backup.expiry_notifications = validateExpiryNotifications(expiryNotifications, errors);
     hasModule = true;
   }
 
@@ -591,6 +616,7 @@ export function summarizeBackup(backup: BackupData): BackupSummary {
     clients: backup.clients?.length || 0,
     ping_tasks: backup.ping_tasks?.length || 0,
     offline_notifications: backup.offline_notifications?.length || 0,
+    expiry_notifications: backup.expiry_notifications?.length || 0,
     load_notifications: backup.load_notifications?.length || 0,
   };
 }

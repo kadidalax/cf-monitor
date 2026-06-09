@@ -24,6 +24,7 @@ const migrations = [
   '006_ping_task_sort_order.sql',
   '007_client_sort_order.sql',
   '008_record_high_watermark.sql',
+  '009_expiry_notifications.sql',
 ];
 
 const telegramRequests = [];
@@ -327,7 +328,7 @@ async function main() {
       method: 'POST',
       headers: agentHeaders(token),
       body: jsonBody({
-        name: 'Smoke Node',
+        name: 'vps-hostname',
         os: 'linux',
         arch: 'x64',
         cpu_name: 'Smoke CPU',
@@ -341,6 +342,14 @@ async function main() {
     });
     assertOk(basicInfo, 'agent basic info upload');
     assert.equal(basicInfo.body.success, true, 'basic info upload should succeed');
+
+    const adminClientsAfterBasicInfo = await request(mf, '/api/admin/clients', {
+      headers: authHeaders(cookie),
+    });
+    assertOk(adminClientsAfterBasicInfo, 'list admin nodes after basic info upload');
+    const namedClient = expectArray(adminClientsAfterBasicInfo.body, 'admin nodes after basic info upload')
+      .find((client) => client.uuid === uuid);
+    assert.equal(namedClient?.name, 'Smoke Node', 'agent hostname should not overwrite the admin configured node name');
 
     const settings = await request(mf, '/api/admin/settings', {
       method: 'POST',
@@ -985,6 +994,42 @@ async function main() {
     });
     assertOk(validLoadNotification, 'valid load notification');
     assert.equal(validLoadNotification.body.success, true, 'valid load notification should save');
+
+    const expiresSoon = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
+    const expiryBillingEdit = await request(mf, `/api/admin/clients/${uuid}/edit`, {
+      method: 'POST',
+      headers: authHeaders(cookie),
+      body: jsonBody({ expired_at: expiresSoon }),
+    });
+    assertOk(expiryBillingEdit, 'set node expiry time');
+
+    const invalidExpiryNotification = await request(mf, '/api/admin/notification/expiry/edit', {
+      method: 'POST',
+      headers: authHeaders(cookie),
+      body: jsonBody({ client: 'missing-client', enable: true, advance_days: 7 }),
+    });
+    assert.equal(invalidExpiryNotification.response.status, 400, 'expiry notification should reject unknown clients');
+
+    const validExpiryNotification = await request(mf, '/api/admin/notification/expiry/edit', {
+      method: 'POST',
+      headers: authHeaders(cookie),
+      body: jsonBody({ client: uuid, enable: true, advance_days: 7 }),
+    });
+    assertOk(validExpiryNotification, 'valid expiry notification');
+    assert.equal(validExpiryNotification.body.success, true, 'valid expiry notification should save');
+
+    telegramRequests.length = 0;
+    const expiryCron = await request(mf, '/api/admin/cron/run', {
+      method: 'POST',
+      headers: authHeaders(cookie),
+    });
+    assertOk(expiryCron, 'manual expiry cron trigger');
+    assert.equal(
+      telegramRequests.some((request) => String(request.payload.text || '').includes('到期提醒')),
+      true,
+      'expiry cron should send a Telegram expiry reminder',
+    );
+    telegramRequests.length = 0;
 
     const pingResult = await request(mf, '/api/clients/ping/result', {
       method: 'POST',

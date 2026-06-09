@@ -9,8 +9,9 @@ param(
   [int]$PingInterval = 30,
   [ValidateSet("websocket", "http")]
   [string]$Mode = "websocket",
-  [string]$InstallDir = "C:\Program Files\CF Monitor",
-  [string]$ServiceName = "CFMonitorAgent",
+  [string]$InstanceId = "",
+  [string]$InstallDir = "",
+  [string]$ServiceName = "",
   [string]$SourceUrl = "",
   [switch]$BuildFromSource,
   [string]$BinaryPath = "",
@@ -26,6 +27,8 @@ param(
   [string]$InstallGhproxy = "",
   [switch]$DryRun,
   [switch]$Uninstall,
+  [switch]$UninstallAll,
+  [switch]$Yes,
   [switch]$KeepFiles
 )
 
@@ -56,17 +59,31 @@ if (-not $DryRun -and -not (Test-Admin)) {
   throw "Please run this script from an elevated PowerShell session."
 }
 
-if ([string]::IsNullOrWhiteSpace($ServiceName)) {
-  throw "-ServiceName cannot be empty."
+function ConvertTo-InstanceId {
+  param([string]$Value)
+  $candidate = if ([string]::IsNullOrWhiteSpace($Value)) { "default" } else { $Value }
+  $cleaned = ($candidate.ToLowerInvariant() -replace '[^a-z0-9_.-]+', '-') -replace '^-+', '' -replace '-+$', ''
+  if ([string]::IsNullOrWhiteSpace($cleaned)) {
+    $cleaned = "default"
+  }
+  if ($cleaned.Length -gt 48) {
+    return $cleaned.Substring(0, 48)
+  }
+  return $cleaned
 }
 
-if ([string]::IsNullOrWhiteSpace($InstallDir) -or [System.IO.Path]::GetPathRoot($InstallDir) -eq $InstallDir) {
-  throw "-InstallDir cannot be empty or a drive root."
+function Set-InstanceDefaults {
+  $rawInstanceId = if ([string]::IsNullOrWhiteSpace($InstanceId)) { $Token } else { $InstanceId }
+  $base = ConvertTo-InstanceId $rawInstanceId
+  if ([string]::IsNullOrWhiteSpace($script:ServiceName)) {
+    $script:ServiceName = "CFMonitorAgent-$base"
+  }
+  if ([string]::IsNullOrWhiteSpace($script:InstallDir)) {
+    $script:InstallDir = Join-Path "$env:ProgramFiles\CF Monitor" $base
+  }
 }
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$targetExe = Join-Path $InstallDir "cf-monitor-agent.exe"
-$runnerPath = Join-Path $InstallDir "run-agent.ps1"
 $repository = "kadidalax/cf-monitor"
 $branch = "main"
 $releaseBase = "https://github.com/$repository/releases/latest/download"
@@ -153,6 +170,50 @@ function Get-DefaultBinaryUrl {
   }
   return Join-GitHubProxy "$releaseBase/cf-monitor-agent-windows-amd64.exe"
 }
+
+function Uninstall-AllAgents {
+  if (-not $Yes) {
+    throw "-UninstallAll requires -Yes because it removes every CFMonitorAgent* service and C:\Program Files\CF Monitor."
+  }
+  $services = Get-Service -Name "CFMonitorAgent*" -ErrorAction SilentlyContinue
+  foreach ($service in $services) {
+    if ($service.Status -ne "Stopped") {
+      Invoke-Step "Stop-Service -Name `"$($service.Name)`" -Force" {
+        Stop-Service -Name $service.Name -Force
+      }
+    }
+    Invoke-Step "sc.exe delete `"$($service.Name)`"" {
+      sc.exe delete $service.Name | Out-Null
+    }
+  }
+  if (-not $KeepFiles) {
+    $rootDir = "$env:ProgramFiles\CF Monitor"
+    Invoke-Step "Remove-Item -LiteralPath `"$rootDir`" -Recurse -Force" {
+      if (Test-Path -LiteralPath $rootDir) {
+        Remove-Item -LiteralPath $rootDir -Recurse -Force
+      }
+    }
+  }
+  Write-Host "Uninstalled all CF Monitor agent services and files."
+}
+
+if ($UninstallAll) {
+  Uninstall-AllAgents
+  exit 0
+}
+
+Set-InstanceDefaults
+
+if ([string]::IsNullOrWhiteSpace($ServiceName)) {
+  throw "-ServiceName cannot be empty."
+}
+
+if ([string]::IsNullOrWhiteSpace($InstallDir) -or [System.IO.Path]::GetPathRoot($InstallDir) -eq $InstallDir) {
+  throw "-InstallDir cannot be empty or a drive root."
+}
+
+$targetExe = Join-Path $InstallDir "cf-monitor-agent.exe"
+$runnerPath = Join-Path $InstallDir "run-agent.ps1"
 
 if ($Uninstall) {
   $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue

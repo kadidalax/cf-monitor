@@ -23,7 +23,7 @@ import {
 } from '../utils/backup';
 import { validatePingTaskInput } from '../utils/ping-task';
 import { validateClientCreateInput, validateClientUpdateInput } from '../utils/client';
-import { validateLoadNotificationInput, validateOfflineNotificationInput } from '../utils/notification';
+import { validateExpiryNotificationInput, validateLoadNotificationInput, validateOfflineNotificationInput } from '../utils/notification';
 import { escapeTelegramHtml } from '../utils/telegram';
 import {
   bestEffortRecordHealthEvent,
@@ -52,6 +52,7 @@ const REQUIRED_D1_TABLES = [
   'ping_tasks',
   'ping_records',
   'offline_notifications',
+  'expiry_notifications',
   'load_notifications',
   'audit_logs',
 ];
@@ -65,6 +66,7 @@ const REQUIRED_D1_COLUMNS: Record<string, string[]> = {
   ping_tasks: ['id', 'name', 'clients', 'all_clients', 'type', 'target', 'interval_sec', 'sort_order'],
   ping_records: ['client', 'task_id', 'time', 'value'],
   offline_notifications: ['client', 'enable', 'grace_period', 'last_notified'],
+  expiry_notifications: ['client', 'enable', 'advance_days', 'last_notified'],
   load_notifications: ['id', 'name', 'clients', 'metric', 'threshold', 'ratio', 'interval_min', 'last_notified'],
   audit_logs: ['id', 'time', 'user', 'action', 'detail', 'level'],
 };
@@ -101,6 +103,7 @@ async function buildBackupSnapshot(database: D1Database): Promise<BackupData> {
   const settings = buildAdminSettings(await db.getAllSettings(database));
   const pingTasks = await db.listPingTasks(database);
   const offlineNotifications = await db.listOfflineNotifications(database);
+  const expiryNotifications = await db.listExpiryNotifications(database);
   const loadNotifications = await db.listLoadNotifications(database);
 
   return {
@@ -114,6 +117,7 @@ async function buildBackupSnapshot(database: D1Database): Promise<BackupData> {
     settings,
     ping_tasks: pingTasks,
     offline_notifications: offlineNotifications,
+    expiry_notifications: expiryNotifications,
     load_notifications: loadNotifications,
   };
 }
@@ -843,6 +847,40 @@ adminRoutes.post('/notification/offline/edit', async (c) => {
     }
     for (const item of normalized) {
       await db.setOfflineNotification(c.env.DB, item.client, item.enable, item.grace_period);
+    }
+    return c.json({ success: true, updated: normalized.length });
+  } catch {
+    return c.json({ error: '保存失败' }, 500);
+  }
+});
+
+// 到期通知列表
+adminRoutes.get('/notification/expiry', async (c) => {
+  const notifications = await db.listExpiryNotifications(c.env.DB);
+  return c.json(notifications);
+});
+
+// 编辑到期通知 (支持单个和批量)
+adminRoutes.post('/notification/expiry/edit', async (c) => {
+  try {
+    const body = await c.req.json();
+    const allowedClientIds = await getAllowedClientIds(c.env.DB);
+    const items = Array.isArray(body) ? body : [body];
+    const normalized = [];
+    const errors: string[] = [];
+    for (const [index, item] of items.entries()) {
+      const validated = validateExpiryNotificationInput(item, allowedClientIds);
+      if (!validated.ok) {
+        errors.push(...validated.errors.map(error => `${index}: ${error}`));
+      } else {
+        normalized.push(validated.item);
+      }
+    }
+    if (errors.length > 0) {
+      return c.json({ error: '到期通知校验失败', details: errors }, 400);
+    }
+    for (const item of normalized) {
+      await db.setExpiryNotification(c.env.DB, item.client, item.enable, item.advance_days);
     }
     return c.json({ success: true, updated: normalized.length });
   } catch {

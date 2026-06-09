@@ -108,4 +108,45 @@ describe('NodeCard monitor layouts', () => {
 
     expect(html.match(/style="width:50%"/g)).toHaveLength(2);
   });
+
+  it('keeps billing metadata in the title row with a reserved slot', () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <NodeCard client={{ ...client, price: 0, expired_at: '' }} live={live} online />
+      </MemoryRouter>,
+    );
+    const titleIndex = html.indexOf(client.name);
+    const billingSlotIndex = html.indexOf('node-card-billing-slot');
+    const metaIndex = html.indexOf('node-card-komari-title-meta');
+
+    expect(billingSlotIndex).toBeGreaterThan(titleIndex);
+    expect(billingSlotIndex).toBeLessThan(metaIndex);
+  });
+
+  it('keeps the next theme fourth metric as monthly traffic instead of connections', () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <NodeCard client={{ ...client, traffic_limit: 0 }} live={{ ...live, connections: 12, connections_udp: 3 }} online />
+      </MemoryRouter>,
+    );
+    const nextLayoutStart = html.indexOf('data-monitor-layout="next"');
+    const nextLayoutEnd = html.indexOf('data-monitor-role="network-panel"', nextLayoutStart);
+    const nextMetricsHtml = html.slice(nextLayoutStart, nextLayoutEnd);
+
+    expect(nextMetricsHtml).toContain('月度');
+    expect(nextMetricsHtml).toContain('未设置');
+    expect(nextMetricsHtml).not.toContain('连接');
+  });
+
+  it('shows monitor ring details as capacity specs instead of duplicate percentages', () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <NodeCard client={client} live={live} online />
+      </MemoryRouter>,
+    );
+
+    expect(html).toContain('4核');
+    expect(html).toContain('3.0 GB / 8.0 GB');
+    expect(html).toContain('18.0 GB / 64.0 GB');
+  });
 });

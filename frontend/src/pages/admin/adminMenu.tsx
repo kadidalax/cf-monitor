@@ -4,6 +4,7 @@ import {
   AtSign,
   Bell,
   Bolt,
+  CalendarClock,
   Ellipsis,
   Globe,
   MessageCircleMore,
@@ -40,6 +41,7 @@ export const adminMenuItems: AdminMenuItem[] = [
     children: [
       { path: '/admin/notifications/settings', label: '通知设置', icon: <MessageCircleMore size={16} /> },
       { path: '/admin/notifications/offline', label: '离线通知', icon: <Unplug size={16} /> },
+      { path: '/admin/notifications/expiry', label: '到期通知', icon: <CalendarClock size={16} /> },
       { path: '/admin/notifications/load', label: '负载通知', icon: <TrendingUp size={16} /> },
     ],
   },
@@ -55,7 +57,7 @@ export function isAdminMenuPathActive(itemPath: string, currentPath: string) {
     return currentPath.startsWith('/admin/notifications') ||
       currentPath.startsWith('/admin/notification');
   }
-  if (itemPath === '/admin') return currentPath === '/admin';
+  if (itemPath === '/admin') return currentPath === '/admin' || currentPath.startsWith('/admin/clients');
   return currentPath === itemPath;
 }
 
@@ -89,6 +91,13 @@ export function isAdminChildPathActive(childPath: string, currentPath: string) {
       currentPath.startsWith('/admin/notification/load/');
   }
 
+  if (childPath === '/admin/notifications/expiry') {
+    return currentPath === childPath ||
+      currentPath.startsWith(`${childPath}/`) ||
+      currentPath === '/admin/notification/expiry' ||
+      currentPath.startsWith('/admin/notification/expiry/');
+  }
+
   return currentPath === childPath || currentPath.startsWith(`${childPath}/`);
 }
 
@@ -108,6 +117,10 @@ export function getAdminSectionTitle(pathname: string) {
     pathname.startsWith('/admin/notification/load')
   ) return '负载通知';
   if (
+    pathname.startsWith('/admin/notifications/expiry') ||
+    pathname.startsWith('/admin/notification/expiry')
+  ) return '到期通知';
+  if (
     pathname.startsWith('/admin/notifications') ||
     pathname.startsWith('/admin/notification')
   ) return '通知管理';
@@ -115,6 +128,6 @@ export function getAdminSectionTitle(pathname: string) {
   if (pathname.startsWith('/admin/logs')) return '审计日志';
   if (pathname.startsWith('/admin/account')) return '账户设置';
   if (pathname.startsWith('/admin/about')) return '关于';
-  if (pathname === '/admin') return '服务器';
+  if (pathname === '/admin' || pathname.startsWith('/admin/clients')) return '服务器';
   return '管理后台';
 }

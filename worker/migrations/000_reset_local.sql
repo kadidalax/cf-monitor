@@ -2,6 +2,7 @@
 -- Intended for `npm run db:reset:local`; do not run against production data.
 DROP TABLE IF EXISTS audit_logs;
 DROP TABLE IF EXISTS load_notifications;
+DROP TABLE IF EXISTS expiry_notifications;
 DROP TABLE IF EXISTS offline_notifications;
 DROP TABLE IF EXISTS ping_records;
 DROP TABLE IF EXISTS ping_tasks;
