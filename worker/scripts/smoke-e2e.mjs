@@ -30,6 +30,7 @@ const migrations = [
   '012_ping_snapshots.sql',
   '013_gpu_snapshots.sql',
   '014_drop_redundant_client_indexes.sql',
+  '015_ping_persist_interval.sql',
 ];
 
 const telegramRequests = [];
@@ -725,6 +726,7 @@ async function assertCapacityEstimateUsesClientCapacityCountsOnly() {
                 'live_poll_active_interval_sec',
                 'live_poll_idle_interval_sec',
                 'record_persist_interval_sec',
+                'ping_record_persist_interval_sec',
                 'record_high_watermark_rows',
                 'audit_log_preserve_time',
                 'capacity_daily_view_minutes',
@@ -737,6 +739,7 @@ async function assertCapacityEstimateUsesClientCapacityCountsOnly() {
                   results: [
                     { key: 'record_enabled', value: 'true' },
                     { key: 'record_persist_interval_sec', value: '60' },
+                    { key: 'ping_record_persist_interval_sec', value: '300' },
                     { key: 'record_preserve_time', value: '72' },
                     { key: 'ping_record_preserve_time', value: '72' },
                     { key: 'live_poll_active_interval_sec', value: '3' },
@@ -794,6 +797,12 @@ async function assertCapacityEstimateUsesClientCapacityCountsOnly() {
   assert.equal(estimate.idle_gpu_snapshots_per_day, 276, 'capacity estimate should include idle GPU snapshot writes');
   assert.equal(estimate.gpu_snapshots_per_day, 396, 'capacity estimate should include total GPU snapshot writes');
   assert.equal(estimate.estimated_gpu_snapshots_retained, 1188, 'capacity estimate should include retained GPU snapshot rows');
+  assert.equal(estimate.ping_record_persist_interval_sec, 300, 'capacity estimate should include the unified Ping interval');
+  assert.equal(estimate.legacy_ping_records_per_day, 2592, 'capacity estimate should keep a legacy per-task comparison');
+  assert.equal(estimate.ping_records_per_day, 2016, 'capacity estimate should estimate one snapshot per covered client per unified Ping interval');
+  assert.equal(estimate.ping_d1_rows_written_per_day, 6048, 'capacity estimate should convert Ping snapshot rows to D1 rows_written');
+  assert.equal(estimate.total_estimated_writes_per_day, 11394, 'capacity estimate should include index write amplification in D1 rows_written');
+  assert.equal(estimate.estimated_worker_requests_per_day, 4375, 'capacity estimate should estimate agent Worker requests from the unified Ping interval');
   assert.equal(
     estimate.ping_tasks.find(task => task.id === 1)?.target_client_count,
     7,
@@ -936,6 +945,9 @@ async function assertDurableObjectPingTaskCacheSemantics() {
 
   const storage = new Map();
   let pingTaskReads = 0;
+  let persistenceSettingReads = 0;
+  let capacityCountReads = 0;
+  let healthWrites = 0;
   let pingWrites = 0;
   const fakeState = {
     getWebSockets() {
@@ -952,6 +964,69 @@ async function assertDurableObjectPingTaskCacheSemantics() {
   };
   const fakeDb = {
     prepare(sql) {
+      if (sql.startsWith('SELECT key, value FROM settings WHERE key IN')) {
+        return {
+          bind(...keys) {
+            assert.deepEqual(
+              keys,
+              [
+                'record_enabled',
+                'record_persist_interval_sec',
+                'ping_record_persist_interval_sec',
+                'record_high_watermark_rows',
+              ],
+              'DO ping persistence should read the full history persistence setting set',
+            );
+            return {
+              async all() {
+                persistenceSettingReads += 1;
+                return {
+                  results: [
+                    { key: 'record_enabled', value: 'true' },
+                    { key: 'record_persist_interval_sec', value: '60' },
+                    { key: 'ping_record_persist_interval_sec', value: '60' },
+                    { key: 'record_high_watermark_rows', value: '450000' },
+                  ],
+                };
+              },
+            };
+          },
+        };
+      }
+      if (sql.startsWith('SELECT COUNT(*) AS count FROM ')) {
+        return {
+          async first() {
+            capacityCountReads += 1;
+            return { count: 0 };
+          },
+        };
+      }
+      if (sql === 'SELECT value FROM settings WHERE key = ?') {
+        return {
+          bind(key) {
+            assert.equal(key, 'health:ping_persistence', 'Ping persistence health should read its own settings key');
+            return {
+              async first() {
+                return null;
+              },
+            };
+          },
+        };
+      }
+      if (sql === 'INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)') {
+        return {
+          bind(key, value) {
+            assert.equal(key, 'health:ping_persistence', 'Ping persistence health should write its own settings key');
+            assert.equal(JSON.parse(value).status, 'ok', 'Ping persistence health write should record ok status');
+            return {
+              async run() {
+                healthWrites += 1;
+                return { success: true, meta: { changes: 1 } };
+              },
+            };
+          },
+        };
+      }
       if (sql === 'SELECT * FROM ping_tasks ORDER BY sort_order ASC, id ASC') {
         return {
           async all() {
@@ -985,14 +1060,18 @@ async function assertDurableObjectPingTaskCacheSemantics() {
   };
 
   const live = new LiveDataDO(fakeState, { DB: fakeDb });
-  await live.persistPingResult('node-a', [{ task_id: 1, value: 20 }], 1);
-  await live.persistPingResult('node-b', [{ task_id: 1, value: 21 }], 2);
+  const now = Date.parse('2026-06-10T00:00:00.000Z');
+  await live.persistPingResult('node-a', [{ task_id: 1, value: 20 }], now);
+  await live.persistPingResult('node-b', [{ task_id: 1, value: 21 }], now + 1);
+  assert.equal(persistenceSettingReads, 1, 'DO ping persistence should cache history persistence settings across close reports');
+  assert.equal(capacityCountReads, 5, 'DO ping persistence should count history tables once before caching the capacity result');
   assert.equal(pingTaskReads, 1, 'DO ping persistence should reuse ping task cache across nodes');
   assert.equal(pingWrites, 2, 'DO ping persistence should still write accepted ping results');
+  assert.equal(healthWrites, 1, 'DO ping persistence should record one throttled success health event');
 
   const refresh = await live.fetch(new Request('https://do/ping-tasks-refresh', { method: 'POST' }));
   assert.equal(refresh.status, 200, 'DO ping task refresh endpoint should succeed');
-  await live.persistPingResult('node-c', [{ task_id: 1, value: 22 }], 3);
+  await live.persistPingResult('node-c', [{ task_id: 1, value: 22 }], now + 2);
   assert.equal(pingTaskReads, 2, 'DO ping task refresh should invalidate the cached task list');
 }
 
@@ -1333,6 +1412,7 @@ async function assertDurableObjectSettingsUseNarrowReads() {
     'live_poll_active_max_duration_sec',
     'record_enabled',
     'record_persist_interval_sec',
+    'ping_record_persist_interval_sec',
     'record_high_watermark_rows',
   ]) {
     assert.match(liveDataSource, new RegExp(`'${key}'`), `Durable Object settings source should include ${key}`);
@@ -1398,6 +1478,7 @@ async function assertAdminCapacityAndMaintenanceSettingsUseNarrowReads() {
     'live_poll_active_interval_sec',
     'live_poll_idle_interval_sec',
     'record_persist_interval_sec',
+    'ping_record_persist_interval_sec',
     'record_high_watermark_rows',
     'audit_log_preserve_time',
     'capacity_daily_view_minutes',
@@ -2765,6 +2846,19 @@ async function main() {
       [secondPingTask.id, pingTask.id],
       'agent ping tasks should follow explicit sort order',
     );
+    const agentPingTasksV2 = await request(mf, '/api/clients/ping/tasks?format=v2', {
+      headers: agentHeaders(token),
+    });
+    assertOk(agentPingTasksV2, 'agent ping tasks v2');
+    assert.ok(Array.isArray(agentPingTasksV2.body.tasks), 'agent ping tasks v2 should return a tasks array');
+    assert.equal(agentPingTasksV2.body.next_poll_sec, 300, 'agent ping tasks v2 should suggest the unified Ping interval');
+    assert.deepEqual(
+      agentPingTasksV2.body.tasks
+        .filter((task) => task.id === pingTask.id || task.id === secondPingTask.id)
+        .map((task) => task.interval_sec),
+      [300, 300],
+      'agent ping tasks v2 should expose the unified Ping interval on each task',
+    );
 
     const capacity = await request(mf, '/api/admin/capacity', {
       headers: authHeaders(cookie),
@@ -2775,6 +2869,7 @@ async function main() {
     assert.equal(capacity.body.gpu_clients, 0, 'capacity should count GPU-capable clients separately');
     assert.equal(capacity.body.capacity_daily_view_minutes, 60, 'capacity should default to one hour of daily viewing');
     assert.equal(capacity.body.record_persist_interval_sec, 60, 'capacity should include the D1 history persist interval');
+    assert.equal(capacity.body.ping_record_persist_interval_sec, 300, 'capacity should include the unified Ping interval');
     assert.equal(capacity.body.record_high_watermark_rows, 450000, 'capacity should include the D1 history high-watermark');
     assert.equal(capacity.body.active_monitor_records_per_day, 120, 'capacity should estimate active monitor writes from daily viewing minutes');
     assert.equal(capacity.body.idle_monitor_records_per_day, 552, 'capacity should estimate idle monitor writes for the rest of the day');
@@ -2782,10 +2877,15 @@ async function main() {
     assert.equal(capacity.body.gpu_storage_mode, 'snapshots', 'capacity should expose GPU snapshot storage mode');
     assert.equal(capacity.body.gpu_snapshots_per_day, 0, 'capacity should estimate no GPU snapshot writes when nodes have no GPU metadata');
     assert.equal(capacity.body.ping_storage_mode, 'snapshots', 'capacity should expose ping snapshot storage mode');
-    assert.equal(capacity.body.legacy_ping_records_per_day, 4320, 'capacity should keep the legacy per-task ping write estimate for comparison');
-    assert.equal(capacity.body.ping_records_per_day, 2880, 'capacity should estimate ping snapshot rows per day for 60s and 120s all-client tasks');
-    assert.equal(capacity.body.ping_records_saved_per_day, 1440, 'capacity should show rows saved by ping snapshots');
-    assert.equal(capacity.body.total_estimated_writes_per_day, 3552, 'capacity should estimate blended total writes per day with ping snapshots');
+    assert.equal(capacity.body.legacy_ping_records_per_day, 1152, 'capacity should keep the legacy per-task ping write estimate for comparison');
+    assert.equal(capacity.body.ping_records_per_day, 576, 'capacity should estimate Ping snapshot rows using the unified Ping interval');
+    assert.equal(capacity.body.ping_records_saved_per_day, 576, 'capacity should show rows saved by ping snapshots');
+    assert.equal(capacity.body.ping_d1_rows_written_per_day, 1728, 'capacity should estimate Ping D1 rows_written including indexes');
+    assert.equal(capacity.body.total_estimated_business_rows_per_day, 1248, 'capacity should expose business history rows separately');
+    assert.equal(capacity.body.total_estimated_writes_per_day, 3744, 'capacity should estimate D1 rows_written including index amplification');
+    assert.equal(capacity.body.ping_result_reports_per_day, 576, 'capacity should estimate Ping result requests from the unified Ping interval');
+    assert.equal(capacity.body.agent_ping_task_pulls_per_day, 576, 'capacity should estimate agent task polling requests from the unified Ping interval');
+    assert.equal(capacity.body.estimated_worker_requests_per_day, 1250, 'capacity should estimate Worker requests separately from D1 writes');
     assert.ok(capacity.body.actual_row_counts, 'capacity should include actual storage row counts');
     assert.ok(capacity.body.row_counts_checked_at, 'capacity should include row-count cache timestamp');
     assert.equal(capacity.body.row_counts_cache_seconds, 60, 'capacity should expose row-count cache TTL');
@@ -3010,7 +3110,7 @@ async function main() {
       'interval-aware batch history should scan enough snapshots to return sparse 600s task points',
     );
 
-    const editPingTaskFastInterval = await request(mf, '/api/admin/ping/edit', {
+    const editPingTaskIgnoredInterval = await request(mf, '/api/admin/ping/edit', {
       method: 'POST',
       headers: authHeaders(cookie),
       body: jsonBody({
@@ -3018,32 +3118,43 @@ async function main() {
         interval_sec: 5,
       }),
     });
-    assertOk(editPingTaskFastInterval, 'edit ping task interval to 5s');
-    assert.equal(editPingTaskFastInterval.body.success, true, 'ping task interval edit should succeed');
+    assertOk(editPingTaskIgnoredInterval, 'edit ping task with ignored interval');
+    assert.equal(editPingTaskIgnoredInterval.body.success, true, 'ping task edit should succeed while ignoring task-level interval');
 
-    await new Promise(resolve => setTimeout(resolve, 5100));
-    const fastIntervalPingResult = await request(mf, '/api/clients/ping/result', {
-      method: 'POST',
-      headers: agentHeaders(token),
-      body: jsonBody([{ task_id: pingTask.id, value: 39 }]),
-    });
-    assertOk(fastIntervalPingResult, 'fast interval ping result report');
-    assert.equal(
-      fastIntervalPingResult.body.accepted,
-      1,
-      'ping result rate limit should follow the saved task interval instead of the old 60s interval',
-    );
-
-    const restorePingTaskInterval = await request(mf, '/api/admin/ping/edit', {
+    const rejectTooFastPingInterval = await request(mf, '/api/admin/settings', {
       method: 'POST',
       headers: authHeaders(cookie),
-      body: jsonBody({
-        ...pingTask,
-        interval_sec: 60,
-      }),
+      body: jsonBody({ ping_record_persist_interval_sec: '5' }),
     });
-    assertOk(restorePingTaskInterval, 'restore ping task interval');
-    assert.equal(restorePingTaskInterval.body.success, true, 'ping task interval restore should succeed');
+    assert.equal(rejectTooFastPingInterval.response.status, 400, 'unified Ping interval should reject values below 60s');
+
+    const updateUnifiedPingInterval = await request(mf, '/api/admin/settings', {
+      method: 'POST',
+      headers: authHeaders(cookie),
+      body: jsonBody({ ping_record_persist_interval_sec: '60' }),
+    });
+    assertOk(updateUnifiedPingInterval, 'update unified Ping interval');
+    assert.equal(updateUnifiedPingInterval.body.success, true, 'unified Ping interval update should succeed');
+
+    const agentPingTasksAfterIntervalUpdate = await request(mf, '/api/clients/ping/tasks?format=v2', {
+      headers: agentHeaders(token),
+    });
+    assertOk(agentPingTasksAfterIntervalUpdate, 'agent ping tasks after unified interval update');
+    assert.equal(agentPingTasksAfterIntervalUpdate.body.next_poll_sec, 60, 'agent ping tasks should use the updated unified Ping interval');
+    assert.deepEqual(
+      agentPingTasksAfterIntervalUpdate.body.tasks
+        .filter((task) => task.id === pingTask.id || task.id === secondPingTask.id)
+        .map((task) => task.interval_sec),
+      [60, 60],
+      'agent ping task intervals should follow the updated unified Ping interval',
+    );
+
+    const restoreUnifiedPingInterval = await request(mf, '/api/admin/settings', {
+      method: 'POST',
+      headers: authHeaders(cookie),
+      body: jsonBody({ ping_record_persist_interval_sec: '300' }),
+    });
+    assertOk(restoreUnifiedPingInterval, 'restore unified Ping interval');
 
     const backupPassword = 'smoke-backup-password';
     const backupDownloadWithoutPassword = await request(mf, '/api/admin/download/backup', {

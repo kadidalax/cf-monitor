@@ -16,6 +16,7 @@ interface CapacityEstimate {
   gpu_clients?: number;
   capacity_daily_view_minutes?: number;
   record_persist_interval_sec?: number;
+  ping_record_persist_interval_sec?: number;
   record_high_watermark_rows?: number;
   active_monitor_records_per_day?: number;
   idle_monitor_records_per_day?: number;
@@ -27,6 +28,14 @@ interface CapacityEstimate {
   estimated_storage_bytes?: number;
   estimated_gpu_snapshots_retained?: number;
   ping_records_per_day: number;
+  monitor_d1_rows_written_per_day?: number;
+  gpu_d1_rows_written_per_day?: number;
+  ping_d1_rows_written_per_day?: number;
+  total_estimated_business_rows_per_day?: number;
+  total_estimated_writes_per_day?: number;
+  ping_result_reports_per_day?: number;
+  agent_ping_task_pulls_per_day?: number;
+  estimated_worker_requests_per_day?: number;
   legacy_ping_records_per_day?: number;
   ping_records_saved_per_day?: number;
   ping_storage_mode?: string;
@@ -91,6 +100,7 @@ const DEFAULT_IDLE_UPLOAD_SEC = 600;
 const MIN_IDLE_UPLOAD_SEC = 60;
 const DEFAULT_VIEWER_TTL_SEC = 600;
 const DEFAULT_RECORD_PERSIST_SEC = 60;
+const DEFAULT_PING_RECORD_PERSIST_SEC = 300;
 const DEFAULT_RECORD_HIGH_WATERMARK_ROWS = 450_000;
 const DEFAULT_DAILY_VIEW_MINUTES = 60;
 const D1_FREE_DAILY_WRITES_FALLBACK = 100_000;
@@ -102,6 +112,9 @@ const ESTIMATED_PING_RECORD_BYTES = 160;
 const ESTIMATED_PING_SNAPSHOT_BYTES = 220;
 const WORKER_FREE_DAILY_REQUESTS = 100_000;
 const WORKER_PAID_DAILY_REQUESTS = 10_000_000;
+const MONITOR_RECORD_D1_ROWS_WRITTEN = 3;
+const GPU_SNAPSHOT_D1_ROWS_WRITTEN = 3;
+const PING_SNAPSHOT_D1_ROWS_WRITTEN = 3;
 
 function clampInteger(value: unknown, fallback: number, min: number, max: number): number {
   const parsed = Number(value);
@@ -242,8 +255,8 @@ export default function SettingsGeneral() {
   const derived = useMemo(() => {
     const clients = Math.max(0, Number(capacity?.clients || 0));
     const gpuClients = Math.max(0, Number(capacity?.gpu_clients || 0));
-    const gpuWritesPerDay = Math.max(0, Number(capacity?.gpu_snapshots_per_day || 0));
-    const pingWritesPerDay = Math.max(0, Number(capacity?.ping_records_per_day || 0));
+    const gpuRowsPerDay = Math.max(0, Number(capacity?.gpu_snapshots_per_day || 0));
+    const pingRowsPerDay = Math.max(0, Number(capacity?.ping_records_per_day || 0));
     const expiredBacklogRows = sumRowCounts(capacity?.expired_row_counts);
     const retentionHours = clampInteger(
       settings.record_preserve_time || settings.ping_record_preserve_time,
@@ -274,6 +287,12 @@ export default function SettingsGeneral() {
       settings.record_persist_interval_sec,
       Number(capacity?.record_persist_interval_sec || DEFAULT_RECORD_PERSIST_SEC),
       3,
+      3600,
+    );
+    const pingRecordPersistIntervalSec = clampInteger(
+      settings.ping_record_persist_interval_sec,
+      Number(capacity?.ping_record_persist_interval_sec || DEFAULT_PING_RECORD_PERSIST_SEC),
+      60,
       3600,
     );
     const recordHighWatermarkRows = clampInteger(
@@ -307,13 +326,13 @@ export default function SettingsGeneral() {
       ? Math.ceil(gpuClients * idleSecondsPerDay / idlePersistIntervalSec)
       : 0;
     const fallbackGpuWritesPerDay = activeGpuWritesPerDay + idleGpuWritesPerDay;
-    const effectiveGpuWritesPerDay = gpuWritesPerDay || fallbackGpuWritesPerDay;
+    const effectiveGpuRowsPerDay = gpuRowsPerDay || fallbackGpuWritesPerDay;
     const estimatedRowsRetained = Number(capacity?.estimated_rows_retained || 0) ||
-      Math.ceil((monitorWritesPerDay + effectiveGpuWritesPerDay + pingWritesPerDay) * retentionHours / 24);
+      Math.ceil((monitorWritesPerDay + effectiveGpuRowsPerDay + pingRowsPerDay) * retentionHours / 24);
     const estimatedMonitorRowsRetained = Math.ceil(monitorWritesPerDay * retentionHours / 24);
     const estimatedGpuRowsRetained = Number(capacity?.estimated_gpu_snapshots_retained || 0) ||
-      Math.ceil(effectiveGpuWritesPerDay * retentionHours / 24);
-    const estimatedPingRowsRetained = Math.ceil(pingWritesPerDay * retentionHours / 24);
+      Math.ceil(effectiveGpuRowsPerDay * retentionHours / 24);
+    const estimatedPingRowsRetained = Math.ceil(pingRowsPerDay * retentionHours / 24);
     const freeRowReference = capacity?.quota_reference?.d1?.retained_rows_reference?.free ||
       capacity?.quota_reference?.d1?.retained_rows_warning?.free ||
       capacity?.d1_reference_rows?.free_reference_rows ||
@@ -338,30 +357,44 @@ export default function SettingsGeneral() {
       WORKER_FREE_DAILY_REQUESTS;
     const workerPaidDailyRequests = capacity?.quota_reference?.workers?.requests_per_day?.paid_included ||
       WORKER_PAID_DAILY_REQUESTS;
-    const mixedDailyWrites = monitorWritesPerDay + effectiveGpuWritesPerDay + pingWritesPerDay;
-    const activeDailyWrites = Math.ceil(clients * 86400 / activePersistIntervalSec)
-      + Math.ceil(gpuClients * 86400 / activePersistIntervalSec)
-      + pingWritesPerDay;
-    const idleDailyWrites = Math.ceil(clients * 86400 / idlePersistIntervalSec)
-      + Math.ceil(gpuClients * 86400 / idlePersistIntervalSec)
-      + pingWritesPerDay;
-    const activeWorkerRequestsPerDay = Math.ceil(clients * 86400 / sampleIntervalSec) + pingWritesPerDay;
-    const idleWorkerRequestsPerDay = Math.ceil(clients * 86400 / idleUploadIntervalSec) + pingWritesPerDay;
-    const mixedWorkerRequestsPerDay = Math.ceil(clients * activeSecondsPerDay / sampleIntervalSec)
-      + Math.ceil(clients * idleSecondsPerDay / idleUploadIntervalSec)
-      + pingWritesPerDay;
+    const monitorD1RowsWrittenPerDay = Number(capacity?.monitor_d1_rows_written_per_day || 0) ||
+      monitorWritesPerDay * MONITOR_RECORD_D1_ROWS_WRITTEN;
+    const gpuD1RowsWrittenPerDay = Number(capacity?.gpu_d1_rows_written_per_day || 0) ||
+      effectiveGpuRowsPerDay * GPU_SNAPSHOT_D1_ROWS_WRITTEN;
+    const pingD1RowsWrittenPerDay = Number(capacity?.ping_d1_rows_written_per_day || 0) ||
+      pingRowsPerDay * PING_SNAPSHOT_D1_ROWS_WRITTEN;
+    const mixedDailyWrites = Number(capacity?.total_estimated_writes_per_day || 0) ||
+      monitorD1RowsWrittenPerDay + gpuD1RowsWrittenPerDay + pingD1RowsWrittenPerDay;
+    const activeDailyWrites = Math.ceil(clients * 86400 / activePersistIntervalSec) * MONITOR_RECORD_D1_ROWS_WRITTEN
+      + Math.ceil(gpuClients * 86400 / activePersistIntervalSec) * GPU_SNAPSHOT_D1_ROWS_WRITTEN
+      + pingD1RowsWrittenPerDay;
+    const idleDailyWrites = Math.ceil(clients * 86400 / idlePersistIntervalSec) * MONITOR_RECORD_D1_ROWS_WRITTEN
+      + Math.ceil(gpuClients * 86400 / idlePersistIntervalSec) * GPU_SNAPSHOT_D1_ROWS_WRITTEN
+      + pingD1RowsWrittenPerDay;
+    const pingResultReportsPerDay = Math.max(0, Number(capacity?.ping_result_reports_per_day || pingRowsPerDay));
+    const fallbackPingTaskPollSec = pingRowsPerDay > 0 ? pingRecordPersistIntervalSec : 600;
+    const agentPingTaskPullsPerDay = Math.max(
+      0,
+      Number(capacity?.agent_ping_task_pulls_per_day || Math.ceil(clients * 86400 / fallbackPingTaskPollSec)),
+    );
+    const fallbackWorkerRequestsPerDay = agentPingTaskPullsPerDay + pingResultReportsPerDay + clients * 49;
+    const mixedWorkerRequestsPerDay = Math.max(0, Number(capacity?.estimated_worker_requests_per_day || fallbackWorkerRequestsPerDay));
+    const activeWorkerRequestsPerDay = mixedWorkerRequestsPerDay;
+    const idleWorkerRequestsPerDay = mixedWorkerRequestsPerDay;
 
     return {
       clients,
       gpuClients,
-      gpuWritesPerDay: effectiveGpuWritesPerDay,
-      pingWritesPerDay,
+      gpuWritesPerDay: effectiveGpuRowsPerDay,
+      pingWritesPerDay: pingD1RowsWrittenPerDay,
+      pingRowsPerDay,
       expiredBacklogRows,
       retentionHours,
       sampleIntervalSec,
       idleUploadIntervalSec,
       viewerTtlSec,
       recordPersistIntervalSec,
+      pingRecordPersistIntervalSec,
       recordHighWatermarkRows,
       dailyViewMinutes,
       activeSecondsPerDay,
@@ -409,6 +442,7 @@ export default function SettingsGeneral() {
         live_poll_idle_interval_sec: String(derived.idleUploadIntervalSec),
         live_poll_active_max_duration_sec: String(derived.viewerTtlSec),
         record_persist_interval_sec: String(derived.recordPersistIntervalSec),
+        ping_record_persist_interval_sec: String(derived.pingRecordPersistIntervalSec),
         record_high_watermark_rows: String(derived.recordHighWatermarkRows),
         capacity_daily_view_minutes: String(derived.dailyViewMinutes),
       };
@@ -514,9 +548,10 @@ export default function SettingsGeneral() {
             <EstimateMetric label="全天有人写入/天" value={formatInteger(derived.activeDailyWrites)} tone="amber" />
             <EstimateMetric label="全天无人写入/天" value={formatInteger(derived.idleDailyWrites)} tone="green" />
             <EstimateMetric label="无人 Worker 请求/天" value={formatInteger(derived.idleWorkerRequestsPerDay)} tone="purple" />
-            <EstimateMetric label="Ping 写入/天" value={formatInteger(derived.pingWritesPerDay)} tone="green" />
+            <EstimateMetric label="Ping D1 写入/天" value={formatInteger(derived.pingWritesPerDay)} tone="green" />
             <EstimateMetric label="保留时间" value={`${derived.retentionHours} 小时`} />
             <EstimateMetric label="历史写入间隔" value={`${derived.recordPersistIntervalSec} 秒`} />
+            <EstimateMetric label="Ping 间隔" value={`${derived.pingRecordPersistIntervalSec} 秒`} />
             <EstimateMetric label="无人打包间隔" value={`${derived.idleUploadIntervalSec} 秒`} />
           </Grid>
           <Text size="1" color="gray" style={{ display: 'block', marginTop: 8 }}>
@@ -562,6 +597,14 @@ export default function SettingsGeneral() {
           onChange={(value) => updateSetting('record_persist_interval_sec', value)}
           type="number"
           placeholder="60"
+        />
+        <SettingInput
+          label="Ping 采集与写入间隔"
+          description="统一控制 Ping 任务执行、结果上报和 D1 历史快照写入；最低 60 秒"
+          value={getSettingValue(settings, 'ping_record_persist_interval_sec', String(DEFAULT_PING_RECORD_PERSIST_SEC))}
+          onChange={(value) => updateSetting('ping_record_persist_interval_sec', value)}
+          type="number"
+          placeholder="300"
         />
         <SettingInput
           label="历史高水位行数"

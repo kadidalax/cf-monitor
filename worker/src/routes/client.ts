@@ -19,6 +19,11 @@ const AGENT_AUTH_CACHE_MS = 15_000;
 const AGENT_AUTH_NEGATIVE_CACHE_MS = 5_000;
 const AGENT_AUTH_CACHE_MAX_ENTRIES = 512;
 const AGENT_PING_TASK_CACHE_MS = 30_000;
+const AGENT_PING_TASK_EMPTY_POLL_SEC = 600;
+const AGENT_PING_TASK_MAX_POLL_SEC = 3600;
+const AGENT_PING_TASK_MIN_POLL_SEC = 60;
+const AGENT_PING_TASK_DEFAULT_INTERVAL_SEC = 300;
+const AGENT_PING_INTERVAL_SETTING_CACHE_MS = 5_000;
 const IP_CHANGE_NOTIFICATION_SETTING_KEYS = [
   'enable_ip_change_notification',
   'telegram_bot_token',
@@ -29,12 +34,14 @@ const AGENT_POLICY_SETTING_KEYS = [
   'live_poll_idle_interval_sec',
   'live_poll_active_max_duration_sec',
 ];
+const AGENT_PING_INTERVAL_SETTING_KEYS = ['ping_record_persist_interval_sec'];
 
 type AgentAuthCacheEntry<T> = { value: T | null; expiresAt: number };
 
 let agentAuthCache = new Map<string, AgentAuthCacheEntry<db.Client>>();
 let agentIdentityAuthCache = new Map<string, AgentAuthCacheEntry<db.ClientIdentity>>();
 let agentPingTasksCache: { value: db.PingTask[]; expiresAt: number } | null = null;
+let agentPingIntervalCache: { value: number; expiresAt: number } | null = null;
 
 export function invalidateAgentClientAuthCache(client?: { uuid?: string; token?: string }): void {
   if (!client) {
@@ -56,6 +63,7 @@ export function invalidateAgentClientAuthCache(client?: { uuid?: string; token?:
 
 export function invalidateAgentPingTaskCache(): void {
   agentPingTasksCache = null;
+  agentPingIntervalCache = null;
 }
 
 function setAgentAuthCache<T>(
@@ -119,6 +127,36 @@ async function listAgentPingTasks(database: D1Database): Promise<db.PingTask[]> 
     expiresAt: now + AGENT_PING_TASK_CACHE_MS,
   };
   return tasks;
+}
+
+async function getUnifiedPingIntervalSec(database: D1Database): Promise<number> {
+  const now = Date.now();
+  if (agentPingIntervalCache && agentPingIntervalCache.expiresAt > now) {
+    return agentPingIntervalCache.value;
+  }
+
+  const settings = buildAdminSettings(await db.getSettingsByKeys(database, AGENT_PING_INTERVAL_SETTING_KEYS));
+  const intervalSec = Number(settings.ping_record_persist_interval_sec);
+  const bounded = Number.isFinite(intervalSec)
+    ? Math.min(Math.max(Math.floor(intervalSec), AGENT_PING_TASK_MIN_POLL_SEC), AGENT_PING_TASK_MAX_POLL_SEC)
+    : AGENT_PING_TASK_DEFAULT_INTERVAL_SEC;
+  agentPingIntervalCache = {
+    value: bounded,
+    expiresAt: now + AGENT_PING_INTERVAL_SETTING_CACHE_MS,
+  };
+  return bounded;
+}
+
+function withUnifiedPingInterval(tasks: db.PingTask[], intervalSec: number): db.PingTask[] {
+  return tasks.map(task => ({ ...task, interval_sec: intervalSec }));
+}
+
+function estimateNextPingTaskPollSec(tasks: db.PingTask[], unifiedIntervalSec: number): number {
+  if (tasks.length === 0) return AGENT_PING_TASK_EMPTY_POLL_SEC;
+  return Math.min(
+    Math.max(unifiedIntervalSec, AGENT_PING_TASK_MIN_POLL_SEC),
+    AGENT_PING_TASK_MAX_POLL_SEC,
+  );
 }
 
 function nonEmptyString(value: unknown, fallback = ''): string {
@@ -455,8 +493,17 @@ clientRoutes.get('/ping/tasks', clientIdentityAuth, async (c) => {
       if (task.all_clients) return true;
       return task.clients.includes(uuid);
     });
+    const unifiedPingIntervalSec = await getUnifiedPingIntervalSec(c.env.DB);
+    const responseTasks = withUnifiedPingInterval(tasks, unifiedPingIntervalSec);
 
-    return c.json(tasks);
+    if (c.req.query('format') === 'v2') {
+      return c.json({
+        tasks: responseTasks,
+        next_poll_sec: estimateNextPingTaskPollSec(responseTasks, unifiedPingIntervalSec),
+      });
+    }
+
+    return c.json(responseTasks);
   } catch {
     return c.json({ error: '获取失败' }, 500);
   }

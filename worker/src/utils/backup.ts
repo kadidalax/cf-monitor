@@ -347,7 +347,7 @@ function validatePingTasks(items: unknown[], errors: string[]): PingTask[] {
       all_clients: booleanField(item.all_clients),
       type: textField(item.type, `ping_tasks[${index}].type`, errors, { maxLength: 16 }) || 'icmp',
       target: textField(item.target, `ping_tasks[${index}].target`, errors, { maxLength: 512 }) || '',
-      interval_sec: integerField(item.interval_sec ?? item.interval, `ping_tasks[${index}].interval_sec`, errors, 60, 5, 86400),
+      interval_sec: integerField(item.interval_sec ?? item.interval, `ping_tasks[${index}].interval_sec`, errors, 60, 60, 86400),
       sort_order: integerField(item.sort_order, `ping_tasks[${index}].sort_order`, errors, index + 1, 1, Number.MAX_SAFE_INTEGER),
     };
     const validated = validatePingTaskInput(candidate);

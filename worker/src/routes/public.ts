@@ -209,7 +209,18 @@ async function getPublicClientsSnapshot(database: D1Database): Promise<PublicCli
   return publicClientsSnapshotCache;
 }
 
-async function getPublicPingTasks(database: D1Database, publicClientIds: Set<string>): Promise<db.PingTask[]> {
+function boundedPublicPingIntervalSec(settings: Record<string, any>): number {
+  const intervalSec = Number(settings.ping_record_persist_interval_sec);
+  return Number.isFinite(intervalSec)
+    ? Math.min(Math.max(Math.floor(intervalSec), 60), 3600)
+    : 300;
+}
+
+async function getPublicPingTasks(
+  database: D1Database,
+  publicClientIds: Set<string>,
+  pingIntervalSec: number,
+): Promise<db.PingTask[]> {
   const now = Date.now();
   if (!cacheIsFresh(publicPingTasksCache, now)) {
     publicPingTasksCache = {
@@ -220,6 +231,7 @@ async function getPublicPingTasks(database: D1Database, publicClientIds: Set<str
   const tasks = publicPingTasksCache?.value || [];
   return tasks
     .map(task => toPublicPingTask(task, publicClientIds))
+    .map(task => task ? { ...task, interval_sec: pingIntervalSec } : task)
     .filter((task): task is db.PingTask => Boolean(task));
 }
 
@@ -876,8 +888,9 @@ publicRoutes.get('/task/ping', async (c) => {
   if (limited) return limited;
 
   const snapshot = await getPublicClientsSnapshot(c.env.DB);
+  const settings = await getPublicSettings(c.env.DB);
   setPublicCache(c, PUBLIC_METADATA_CACHE_SECONDS);
-  return c.json(await getPublicPingTasks(c.env.DB, snapshot.publicClientIds));
+  return c.json(await getPublicPingTasks(c.env.DB, snapshot.publicClientIds, boundedPublicPingIntervalSec(settings)));
 });
 
 // 节点信息（兼容旧版格式）

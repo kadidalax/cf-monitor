@@ -29,8 +29,11 @@ interface ClientState {
 }
 
 const RECORD_PERSIST_INTERVAL_MS = 60_000;
+const PING_RECORD_PERSIST_INTERVAL_MS = 300_000;
 const MIN_RECORD_PERSIST_INTERVAL_MS = 3_000;
 const MAX_RECORD_PERSIST_INTERVAL_MS = 3_600_000;
+const MIN_PING_RECORD_PERSIST_INTERVAL_MS = 60_000;
+const MAX_PING_RECORD_PERSIST_INTERVAL_MS = 3_600_000;
 const RECORD_SETTING_CACHE_MS = 5_000;
 const RECORD_HIGH_WATERMARK_DEFAULT_ROWS = 450_000;
 const RECORD_HIGH_WATERMARK_MIN_ROWS = 1_000;
@@ -50,6 +53,7 @@ const AGENT_POLICY_SETTING_KEYS = [
 const RECORD_PERSISTENCE_SETTING_KEYS = [
   'record_enabled',
   'record_persist_interval_sec',
+  'ping_record_persist_interval_sec',
   'record_high_watermark_rows',
 ];
 const HTTP_CLIENT_MIN_TTL_MS = 30_000;
@@ -114,6 +118,7 @@ export class LiveDataDO {
   private cachedData: any = null;
   private recordPersistenceEnabled: boolean = true;
   private recordPersistIntervalMs: number = RECORD_PERSIST_INTERVAL_MS;
+  private pingRecordPersistIntervalMs: number = PING_RECORD_PERSIST_INTERVAL_MS;
   private recordPersistenceCheckedAt: number = 0;
   private recordHighWatermarkRows: number = RECORD_HIGH_WATERMARK_DEFAULT_ROWS;
   private recordCapacityNextCheckAt: number = 0;
@@ -1036,6 +1041,14 @@ export class LiveDataDO {
         Math.max(boundedIntervalSec * 1000, MIN_RECORD_PERSIST_INTERVAL_MS),
         MAX_RECORD_PERSIST_INTERVAL_MS,
       );
+      const pingIntervalSec = Number(settings.ping_record_persist_interval_sec);
+      const boundedPingIntervalSec = Number.isFinite(pingIntervalSec)
+        ? Math.min(Math.max(Math.floor(pingIntervalSec), 60), 3600)
+        : PING_RECORD_PERSIST_INTERVAL_MS / 1000;
+      this.pingRecordPersistIntervalMs = Math.min(
+        Math.max(boundedPingIntervalSec * 1000, MIN_PING_RECORD_PERSIST_INTERVAL_MS),
+        MAX_PING_RECORD_PERSIST_INTERVAL_MS,
+      );
       const highWatermarkRows = Number(settings.record_high_watermark_rows);
       this.recordHighWatermarkRows = Number.isFinite(highWatermarkRows)
         ? Math.min(
@@ -1185,6 +1198,9 @@ export class LiveDataDO {
     if (!this.env?.DB) return;
 
     try {
+      if (!(await this.isRecordPersistenceEnabled(nowMs))) return;
+      if (!(await this.canPersistWithinCapacity(nowMs))) return;
+
       const tasks = await this.getPingTasks(nowMs);
       const validated = validatePingResults(result, tasks, clientId);
       if (!validated.ok) return;
@@ -1221,12 +1237,19 @@ export class LiveDataDO {
 
     try {
       const nowMs = Number.isFinite(Number(payload.timestamp)) ? Number(payload.timestamp) : Date.now();
+      if (!(await this.isRecordPersistenceEnabled(nowMs))) {
+        return Response.json({ success: true, accepted: 0, disabled: true });
+      }
+      if (!(await this.canPersistWithinCapacity(nowMs))) {
+        return Response.json({ success: true, accepted: 0, capacity_limited: true });
+      }
+
       let accepted: PingPersistenceResult[] = [];
       const trustedResults = this.trustedPingResults(payload.results);
       if (trustedResults) {
         accepted = await this.filterTrustedPingResultsByInterval(payload.client_id, trustedResults, nowMs);
       } else {
-          const tasks = await this.getPingTasks(nowMs);
+        const tasks = await this.getPingTasks(nowMs);
         const validated = validatePingResults(payload.results, tasks, payload.client_id);
         if (!validated.ok) {
           return Response.json({ error: validated.error }, { status: validated.status });
@@ -1258,19 +1281,11 @@ export class LiveDataDO {
   }
 
   private pingTaskIntervalMs(task: db.PingTask | undefined): number {
-    const intervalSec = Number(task?.interval_sec || 60);
-    const boundedSec = Number.isFinite(intervalSec)
-      ? Math.min(Math.max(Math.floor(intervalSec), 5), 86_400)
-      : 60;
-    return boundedSec * 1000;
+    return this.pingRecordPersistIntervalMs;
   }
 
   private pingResultIntervalMs(result: PingPersistenceResult, task: db.PingTask | undefined): number {
-    const intervalSec = Number(result.intervalSec ?? task?.interval_sec ?? 60);
-    const boundedSec = Number.isFinite(intervalSec)
-      ? Math.min(Math.max(Math.floor(intervalSec), 5), 86_400)
-      : 60;
-    return boundedSec * 1000;
+    return this.pingRecordPersistIntervalMs;
   }
 
   private trustedPingResults(input: unknown): PingPersistenceResult[] | null {

@@ -51,21 +51,6 @@ function getTaskScopeLabel(task: PingTask, clients: ClientLite[]) {
     .join(', ');
 }
 
-function estimateDailyDiskUsage(tasks: PingTask[], clients: ClientLite[]) {
-  const recordSize = (36 + 8 + 8 + 33 + 20) * 2;
-  const totalRecordsPerDay = tasks.reduce((total, task) => {
-    const clientCount = task.all_clients ? clients.length : (task.clients?.length || 0);
-    if (clientCount === 0) return total;
-    const interval = Math.max(task.interval_sec || 60, 1);
-    return total + (clientCount * 86400) / interval;
-  }, 0);
-  const bytesPerDay = totalRecordsPerDay * recordSize;
-
-  if (bytesPerDay < 1024) return `${Math.round(bytesPerDay)} B`;
-  if (bytesPerDay < 1048576) return `${(bytesPerDay / 1024).toFixed(1)} KB`;
-  return `${(bytesPerDay / 1048576).toFixed(1)} MB`;
-}
-
 function TaskDialog({
   open,
   onOpenChange,
@@ -91,7 +76,6 @@ function TaskDialog({
         name: editingTask.name,
         type: editingTask.type,
         target: editingTask.target,
-        interval: editingTask.interval_sec,
         clients: editingTask.clients || [],
         all_clients: editingTask.all_clients,
       });
@@ -102,7 +86,6 @@ function TaskDialog({
       name: '',
       type: 'icmp',
       target: '',
-      interval: 60,
       clients: [],
       all_clients: true,
     });
@@ -122,7 +105,6 @@ function TaskDialog({
   const handleSave = async () => {
     const name = String(formData.name || '').trim();
     const target = String(formData.target || '').trim();
-    const interval = Number(formData.interval || 60);
 
     if (!name) {
       toast.error('请输入任务名称');
@@ -131,11 +113,6 @@ function TaskDialog({
 
     if (!target) {
       toast.error('请输入目标地址');
-      return;
-    }
-
-    if (!Number.isFinite(interval) || interval < 5) {
-      toast.error('检测间隔至少为 5 秒');
       return;
     }
 
@@ -150,7 +127,6 @@ function TaskDialog({
       name,
       type: String(formData.type || 'icmp'),
       target,
-      interval,
       clients: allClients ? [] : selectedClients,
       all_clients: allClients,
     };
@@ -219,17 +195,6 @@ function TaskDialog({
               style={{ width: '100%', marginTop: 4 }}
               value={String(formData.target || '')}
               onChange={(event) => setFormData({ ...formData, target: event.target.value })}
-            />
-          </label>
-
-          <label>
-            <Text size="2" weight="bold">检测间隔 (秒)</Text>
-            <TextField.Root
-              style={{ width: '100%', marginTop: 4 }}
-              type="number"
-              min="5"
-              value={String(formData.interval || 60)}
-              onChange={(event) => setFormData({ ...formData, interval: parseInt(event.target.value, 10) || 60 })}
             />
           </label>
 
@@ -329,7 +294,6 @@ function TaskRow({
       </Table.Cell>
       <Table.Cell><Badge variant="soft">{task.type.toUpperCase()}</Badge></Table.Cell>
       <Table.Cell><Text size="1" style={{ fontFamily: 'monospace' }}>{task.target}</Text></Table.Cell>
-      <Table.Cell><Text size="1">{task.interval_sec}s</Text></Table.Cell>
       <Table.Cell>
         {task.all_clients ? (
           <Badge color="green">所有服务器</Badge>
@@ -523,7 +487,6 @@ export default function AdminPingTasks() {
                 <Table.ColumnHeaderCell>名称</Table.ColumnHeaderCell>
                 <Table.ColumnHeaderCell>类型</Table.ColumnHeaderCell>
                 <Table.ColumnHeaderCell>目标</Table.ColumnHeaderCell>
-                <Table.ColumnHeaderCell>间隔</Table.ColumnHeaderCell>
                 <Table.ColumnHeaderCell>应用范围</Table.ColumnHeaderCell>
                 <Table.ColumnHeaderCell width="220px">操作</Table.ColumnHeaderCell>
               </Table.Row>
@@ -531,7 +494,7 @@ export default function AdminPingTasks() {
             <Table.Body>
               {filteredTasks.length === 0 ? (
                 <Table.Row>
-                  <Table.Cell colSpan={6}>
+                  <Table.Cell colSpan={5}>
                     <Text color="gray" align="center" style={{ display: 'block', padding: 24 }}>
                       {search || scopeFilter !== 'all' ? '没有匹配的 Ping 任务' : '暂无 Ping 任务'}
                     </Text>
@@ -588,19 +551,6 @@ export default function AdminPingTasks() {
           </Table.Root>
         </Card>
       )}
-
-      {tasks.length > 0 && (
-        <Card style={{ padding: '12px 16px' }}>
-          <Flex align="center" gap="2" wrap="wrap">
-            <Text size="2" color="gray">预计磁盘消耗 (每日):</Text>
-            <Text size="2" weight="bold" style={{ fontFamily: 'monospace' }}>
-              {estimateDailyDiskUsage(tasks, clients)}
-            </Text>
-            <Text size="1" color="gray">基于任务数、服务器数和检测间隔估算</Text>
-          </Flex>
-        </Card>
-      )}
-
       <TaskDialog
         open={dialogOpen}
         onOpenChange={setDialogOpen}

@@ -83,6 +83,13 @@ export const SETTING_SCHEMA = {
     min: 3,
     max: 3600,
   },
+  ping_record_persist_interval_sec: {
+    type: 'integer',
+    defaultValue: '300',
+    public: true,
+    min: 60,
+    max: 3600,
+  },
   record_high_watermark_rows: {
     type: 'integer',
     defaultValue: '450000',

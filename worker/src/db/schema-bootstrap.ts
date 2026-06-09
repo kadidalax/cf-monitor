@@ -1,4 +1,4 @@
-const SCHEMA_BOOTSTRAP_VERSION = '2026-06-09-client-index-prune-v1';
+const SCHEMA_BOOTSTRAP_VERSION = '2026-06-10-ping-unified-interval-v1';
 const SCHEMA_BOOTSTRAP_KEY = 'schema_bootstrap_version';
 
 const SCHEMA_STATEMENTS = [
@@ -159,6 +159,7 @@ const SCHEMA_STATEMENTS = [
   `INSERT OR IGNORE INTO settings (key, value) VALUES ('record_preserve_time', '72')`,
   `INSERT OR IGNORE INTO settings (key, value) VALUES ('ping_record_preserve_time', '72')`,
   `INSERT OR IGNORE INTO settings (key, value) VALUES ('record_persist_interval_sec', '60')`,
+  `INSERT OR IGNORE INTO settings (key, value) VALUES ('ping_record_persist_interval_sec', '300')`,
   `INSERT OR IGNORE INTO settings (key, value) VALUES ('record_high_watermark_rows', '450000')`,
   `INSERT OR IGNORE INTO settings (key, value) VALUES ('capacity_daily_view_minutes', '60')`,
   `INSERT OR IGNORE INTO settings (key, value) VALUES ('audit_log_preserve_time', '2160')`,

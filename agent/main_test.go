@@ -468,28 +468,56 @@ func TestPingTaskIntervalFallbacks(t *testing.T) {
 }
 
 func TestPingPollDelayFollowsShortestReturnedTaskInterval(t *testing.T) {
-	if got := pingPollDelay(nil, 0); got != 60*time.Second {
+	if got := pingPollDelay(nil, 0, 0); got != 60*time.Second {
 		t.Fatalf("pingPollDelay(empty fallback) = %s, want 60s", got)
 	}
 
 	if got := pingPollDelay([]PingTask{
 		{ID: 1, IntervalSec: 60},
 		{ID: 2, IntervalSec: 120},
-	}, 60); got != 60*time.Second {
+	}, 60, 0); got != 60*time.Second {
 		t.Fatalf("pingPollDelay(default tasks) = %s, want 60s", got)
 	}
 
 	if got := pingPollDelay([]PingTask{
 		{ID: 1, IntervalSec: 60},
 		{ID: 2, IntervalSec: 10},
-	}, 60); got != 10*time.Second {
+	}, 60, 0); got != 10*time.Second {
 		t.Fatalf("pingPollDelay(short task) = %s, want 10s", got)
 	}
 
 	if got := pingPollDelay([]PingTask{
 		{ID: 1, IntervalSec: 120},
-	}, 45); got != 45*time.Second {
+	}, 45, 0); got != 45*time.Second {
 		t.Fatalf("pingPollDelay(configured cap) = %s, want 45s", got)
+	}
+
+	if got := pingPollDelay(nil, 60, 600); got != 600*time.Second {
+		t.Fatalf("pingPollDelay(server suggestion) = %s, want 600s", got)
+	}
+
+	if got := pingPollDelay([]PingTask{
+		{ID: 1, IntervalSec: 10},
+	}, 60, 600); got != 10*time.Second {
+		t.Fatalf("pingPollDelay(task shorter than suggestion) = %s, want 10s", got)
+	}
+}
+
+func TestDecodePingTasksResponseSupportsLegacyAndV2(t *testing.T) {
+	legacyTasks, legacyNextPoll, err := decodePingTasksResponse(strings.NewReader(`[{"id":1,"name":"legacy","interval_sec":60}]`))
+	if err != nil {
+		t.Fatalf("decode legacy ping tasks: %v", err)
+	}
+	if len(legacyTasks) != 1 || legacyTasks[0].ID != 1 || legacyNextPoll != 0 {
+		t.Fatalf("legacy ping tasks = %#v next=%d, want one task and no suggestion", legacyTasks, legacyNextPoll)
+	}
+
+	v2Tasks, v2NextPoll, err := decodePingTasksResponse(strings.NewReader(`{"tasks":[{"id":2,"name":"v2","interval_sec":120}],"next_poll_sec":600}`))
+	if err != nil {
+		t.Fatalf("decode v2 ping tasks: %v", err)
+	}
+	if len(v2Tasks) != 1 || v2Tasks[0].ID != 2 || v2NextPoll != 600 {
+		t.Fatalf("v2 ping tasks = %#v next=%d, want one task and 600s suggestion", v2Tasks, v2NextPoll)
 	}
 }
 
@@ -978,7 +1006,7 @@ func TestRESTEndpointsPreserveWorkerBasePath(t *testing.T) {
 
 	uploadBasicInfo()
 	sendHTTPReport(&reportPreparer{})
-	executePingTasks(newPingTaskScheduler(), time.Now())
+	_, _ = executePingTasks(newPingTaskScheduler(), time.Now())
 
 	want := map[string]bool{
 		"/base/api/clients/uploadBasicInfo": false,
@@ -1078,7 +1106,7 @@ func TestExecutePingTasksSkipsInvalidTaskResponses(t *testing.T) {
 			defer worker.Close()
 
 			serverURL = worker.URL
-			executePingTasks(newPingTaskScheduler(), time.Now())
+			_, _ = executePingTasks(newPingTaskScheduler(), time.Now())
 
 			if resultPosts != 0 {
 				t.Fatalf("ping result posts = %d, want no report for invalid task response", resultPosts)
@@ -1142,7 +1170,7 @@ func TestExecutePingTasksReportsLossValueForFailedTargets(t *testing.T) {
 	defer worker.Close()
 
 	serverURL = worker.URL
-	executePingTasks(newPingTaskScheduler(), time.Now())
+	_, _ = executePingTasks(newPingTaskScheduler(), time.Now())
 
 	select {
 	case results := <-resultCh:
@@ -1276,7 +1304,7 @@ func TestAgentProtocolAgainstMockWorker(t *testing.T) {
 
 	uploadBasicInfo()
 	sendHTTPReport(&reportPreparer{})
-	executePingTasks(newPingTaskScheduler(), time.Now())
+	_, _ = executePingTasks(newPingTaskScheduler(), time.Now())
 
 	requirePath := func(path string) capturedRequest {
 		t.Helper()

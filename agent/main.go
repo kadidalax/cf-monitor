@@ -118,6 +118,11 @@ type PingTask struct {
 	AllClients  bool     `json:"all_clients"`
 }
 
+type pingTasksResponse struct {
+	Tasks       []PingTask `json:"tasks"`
+	NextPollSec int        `json:"next_poll_sec"`
+}
+
 type PingResult struct {
 	TaskID int     `json:"task_id"`
 	Value  float64 `json:"value"`
@@ -519,17 +524,17 @@ func detectAMDGPU() ([]string, []GPUInfo) {
 func runPingPoller() {
 	scheduler := newPingTaskScheduler()
 	for {
-		tasks := executePingTasks(scheduler, time.Now())
-		time.Sleep(pingPollDelay(tasks, pingInterval))
+		tasks, nextPollSec := executePingTasks(scheduler, time.Now())
+		time.Sleep(pingPollDelay(tasks, pingInterval, nextPollSec))
 	}
 }
 
-func executePingTasks(scheduler *pingTaskScheduler, now time.Time) []PingTask {
-	endpoint := serverURL + "/api/clients/ping/tasks"
+func executePingTasks(scheduler *pingTaskScheduler, now time.Time) ([]PingTask, int) {
+	endpoint := serverURL + "/api/clients/ping/tasks?format=v2"
 	req, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
 		log.Printf("ping tasks request error: %v", err)
-		return nil
+		return nil, 0
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
@@ -537,28 +542,28 @@ func executePingTasks(scheduler *pingTaskScheduler, now time.Time) []PingTask {
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("ping tasks fetch failed: %v", err)
-		return nil
+		return nil, 0
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
 		log.Printf("ping tasks HTTP %d", resp.StatusCode)
-		return nil
+		return nil, 0
 	}
 
-	var tasks []PingTask
-	if err := json.NewDecoder(resp.Body).Decode(&tasks); err != nil {
+	tasks, nextPollSec, err := decodePingTasksResponse(resp.Body)
+	if err != nil {
 		log.Printf("ping tasks parse error: %v", err)
-		return nil
+		return nil, 0
 	}
 
 	if len(tasks) == 0 {
-		return tasks
+		return tasks, nextPollSec
 	}
 
 	dueTasks := scheduler.dueTasks(tasks, now)
 	if len(dueTasks) == 0 {
-		return tasks
+		return tasks, nextPollSec
 	}
 
 	log.Printf("executing %d ping task(s)", len(dueTasks))
@@ -587,13 +592,37 @@ func executePingTasks(scheduler *pingTaskScheduler, now time.Time) []PingTask {
 	if len(results) > 0 {
 		reportPingResults(results)
 	}
-	return tasks
+	return tasks, nextPollSec
 }
 
-func pingPollDelay(tasks []PingTask, configuredIntervalSec int) time.Duration {
+func decodePingTasksResponse(body io.Reader) ([]PingTask, int, error) {
+	var raw json.RawMessage
+	if err := json.NewDecoder(body).Decode(&raw); err != nil {
+		return nil, 0, err
+	}
+
+	var tasks []PingTask
+	if err := json.Unmarshal(raw, &tasks); err == nil {
+		return tasks, 0, nil
+	}
+
+	var envelope pingTasksResponse
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nil, 0, err
+	}
+	if envelope.Tasks == nil {
+		envelope.Tasks = []PingTask{}
+	}
+	return envelope.Tasks, envelope.NextPollSec, nil
+}
+
+func pingPollDelay(tasks []PingTask, configuredIntervalSec int, suggestedNextPollSec int) time.Duration {
 	intervalSec := configuredIntervalSec
 	if intervalSec < 1 {
 		intervalSec = defaultPingIntervalSec
+	}
+	if suggestedNextPollSec > 0 {
+		intervalSec = suggestedNextPollSec
 	}
 	for _, task := range tasks {
 		taskInterval := task.IntervalSec

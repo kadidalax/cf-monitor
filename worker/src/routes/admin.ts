@@ -59,6 +59,7 @@ const LIVE_POLICY_SETTING_KEYS = new Set([
 const RECORD_PERSISTENCE_SETTING_KEYS = new Set([
   'record_enabled',
   'record_persist_interval_sec',
+  'ping_record_persist_interval_sec',
   'record_high_watermark_rows',
 ]);
 const CAPACITY_ESTIMATE_SETTING_KEYS = [
@@ -68,6 +69,7 @@ const CAPACITY_ESTIMATE_SETTING_KEYS = [
   'live_poll_active_interval_sec',
   'live_poll_idle_interval_sec',
   'record_persist_interval_sec',
+  'ping_record_persist_interval_sec',
   'record_high_watermark_rows',
   'audit_log_preserve_time',
   'capacity_daily_view_minutes',
@@ -113,6 +115,14 @@ const REQUIRED_D1_COLUMNS: Record<string, string[]> = {
   load_notifications: ['id', 'name', 'clients', 'metric', 'threshold', 'ratio', 'interval_min', 'last_notified'],
   audit_logs: ['id', 'time', 'user', 'action', 'detail', 'level'],
 };
+const MONITOR_RECORD_D1_ROWS_WRITTEN = 3;
+const GPU_SNAPSHOT_D1_ROWS_WRITTEN = 3;
+const PING_SNAPSHOT_D1_ROWS_WRITTEN = 3;
+const EMPTY_AGENT_PING_TASK_POLL_SEC = 600;
+const DEFAULT_UNIFIED_PING_INTERVAL_SEC = 300;
+const MIN_UNIFIED_PING_INTERVAL_SEC = 60;
+const MAX_UNIFIED_PING_INTERVAL_SEC = 3600;
+const AGENT_BASIC_INFO_REPORTS_PER_DAY = 48;
 
 type LiveClientMeta = Pick<db.Client, 'uuid' | 'name'> & { hidden?: unknown };
 
@@ -470,38 +480,40 @@ function capacityRiskLevel(estimatedRows: number, freeRows: number, paidRows: nu
 function estimatePingSnapshotRowsPerDay(
   clientCount: number,
   pingTasks: db.PingTaskEstimateRow[],
+  pingIntervalSec: number = DEFAULT_UNIFIED_PING_INTERVAL_SEC,
 ): number {
-  const allClientIntervals: number[] = [];
-  const targetedMinIntervalByClient = new Map<string, number>();
+  let hasAllClientTask = false;
+  const targetedClients = new Set<string>();
+  const boundedPingIntervalSec = Math.max(1, Math.floor(pingIntervalSec));
 
   for (const task of pingTasks) {
-    const intervalSec = Math.max(1, parsePositiveNumber(task.interval_sec, 60));
     if (task.all_clients) {
-      allClientIntervals.push(intervalSec);
+      hasAllClientTask = true;
       continue;
     }
     for (const uuid of parseJsonArray(task.clients).filter((item) => typeof item === 'string')) {
-      const previous = targetedMinIntervalByClient.get(uuid);
-      if (previous === undefined || intervalSec < previous) {
-        targetedMinIntervalByClient.set(uuid, intervalSec);
-      }
+      targetedClients.add(uuid);
     }
   }
 
-  const allClientMinInterval = allClientIntervals.length > 0
-    ? Math.min(...allClientIntervals)
-    : null;
-  const allClientRowsPerClient = allClientMinInterval
-    ? Math.ceil(86400 / allClientMinInterval)
-    : 0;
-  let rowsPerDay = allClientRowsPerClient * clientCount;
-
-  for (const intervalSec of targetedMinIntervalByClient.values()) {
-    const targetedRows = Math.ceil(86400 / intervalSec);
-    rowsPerDay += Math.max(0, targetedRows - allClientRowsPerClient);
-  }
+  const coveredClientCount = hasAllClientTask ? clientCount : targetedClients.size;
+  const rowsPerClient = pingTasks.length > 0 ? Math.ceil(86400 / boundedPingIntervalSec) : 0;
+  const rowsPerDay = coveredClientCount * rowsPerClient;
 
   return rowsPerDay;
+}
+
+function estimateAgentPingTaskPullsPerDay(
+  clientCount: number,
+  pingTasks: db.PingTaskEstimateRow[],
+  pingIntervalSec: number,
+): number {
+  if (pingTasks.length === 0) {
+    return Math.ceil(clientCount * 86400 / EMPTY_AGENT_PING_TASK_POLL_SEC);
+  }
+
+  const pollIntervalSec = Math.max(1, Math.floor(pingIntervalSec));
+  return Math.ceil(clientCount * 86400 / pollIntervalSec);
 }
 
 type CapacityRowCountSnapshot = {
@@ -592,6 +604,10 @@ export async function buildCapacityEstimate(database: D1Database, options: { for
   const sampleIntervalSec = Math.max(3, parsePositiveNumber(settings.live_poll_active_interval_sec, 3));
   const idleIntervalSec = Math.max(60, parsePositiveNumber(settings.live_poll_idle_interval_sec, 600));
   const persistIntervalSec = Math.max(3, parsePositiveNumber(settings.record_persist_interval_sec, 60));
+  const unifiedPingIntervalSec = Math.min(
+    MAX_UNIFIED_PING_INTERVAL_SEC,
+    Math.max(MIN_UNIFIED_PING_INTERVAL_SEC, parsePositiveNumber(settings.ping_record_persist_interval_sec, DEFAULT_UNIFIED_PING_INTERVAL_SEC)),
+  );
   const highWatermarkRows = Math.min(10_000_000, Math.max(1_000, parsePositiveNumber(settings.record_high_watermark_rows, 450_000)));
   const auditPreserveHours = Math.max(24, parsePositiveNumber(settings.audit_log_preserve_time, 2160));
   const effectiveActiveIntervalSec = Math.max(sampleIntervalSec, persistIntervalSec);
@@ -616,22 +632,41 @@ export async function buildCapacityEstimate(database: D1Database, options: { for
   let legacyPingRecordsPerDay = 0;
 
   const pingTasksWithEstimates = pingTasks.map((task) => {
-    const intervalSec = Math.max(1, parsePositiveNumber(task.interval_sec, 60));
     const targetClientCount = task.all_clients
       ? clientCount
       : parseJsonArray(task.clients).filter((uuid) => typeof uuid === 'string').length;
-    const writesPerDay = Math.ceil(targetClientCount * 86400 / intervalSec);
+    const writesPerDay = recordEnabled ? Math.ceil(targetClientCount * 86400 / unifiedPingIntervalSec) : 0;
     legacyPingRecordsPerDay += writesPerDay;
     return {
       id: task.id,
       name: task.name,
-      interval_sec: intervalSec,
+      interval_sec: unifiedPingIntervalSec,
+      history_interval_sec: unifiedPingIntervalSec,
       target_client_count: targetClientCount,
       legacy_estimated_writes_per_day: writesPerDay,
     };
   });
-  const pingRecordsPerDay = estimatePingSnapshotRowsPerDay(clientCount, pingTasks);
+  const pingRecordsPerDay = recordEnabled
+    ? estimatePingSnapshotRowsPerDay(clientCount, pingTasks, unifiedPingIntervalSec)
+    : 0;
+  const pingResultReportsPerDay = estimatePingSnapshotRowsPerDay(clientCount, pingTasks, unifiedPingIntervalSec);
+  const agentPingTaskPullsPerDay = estimateAgentPingTaskPullsPerDay(clientCount, pingTasks, unifiedPingIntervalSec);
+  const agentBasicInfoReportsPerDay = clientCount * AGENT_BASIC_INFO_REPORTS_PER_DAY;
+  const agentWebsocketConnectsPerDay = clientCount;
+  const estimatedWorkerRequestsPerDay =
+    agentPingTaskPullsPerDay +
+    pingResultReportsPerDay +
+    agentBasicInfoReportsPerDay +
+    agentWebsocketConnectsPerDay;
   const pingRecordsSavedPerDay = Math.max(0, legacyPingRecordsPerDay - pingRecordsPerDay);
+  const monitorD1RowsWrittenPerDay = monitorRecordsPerDay * MONITOR_RECORD_D1_ROWS_WRITTEN;
+  const gpuD1RowsWrittenPerDay = gpuSnapshotsPerDay * GPU_SNAPSHOT_D1_ROWS_WRITTEN;
+  const pingD1RowsWrittenPerDay = pingRecordsPerDay * PING_SNAPSHOT_D1_ROWS_WRITTEN;
+  const totalEstimatedBusinessRowsPerDay = monitorRecordsPerDay + gpuSnapshotsPerDay + pingRecordsPerDay;
+  const totalEstimatedD1RowsWrittenPerDay =
+    monitorD1RowsWrittenPerDay +
+    gpuD1RowsWrittenPerDay +
+    pingD1RowsWrittenPerDay;
 
   const estimatedMonitorRecordsRetained = Math.ceil(monitorRecordsPerDay * recordPreserveHours / 24);
   const estimatedGpuSnapshotsRetained = Math.ceil(gpuSnapshotsPerDay * recordPreserveHours / 24);
@@ -656,6 +691,7 @@ export async function buildCapacityEstimate(database: D1Database, options: { for
     ping_record_preserve_hours: pingPreserveHours,
     audit_log_preserve_hours: auditPreserveHours,
     record_persist_interval_sec: persistIntervalSec,
+    ping_record_persist_interval_sec: unifiedPingIntervalSec,
     record_high_watermark_rows: highWatermarkRows,
     capacity_daily_view_minutes: dailyViewMinutes,
     active_seconds_per_day: activeSecondsPerDay,
@@ -671,7 +707,21 @@ export async function buildCapacityEstimate(database: D1Database, options: { for
     ping_records_per_day: pingRecordsPerDay,
     legacy_ping_records_per_day: legacyPingRecordsPerDay,
     ping_records_saved_per_day: pingRecordsSavedPerDay,
-    total_estimated_writes_per_day: monitorRecordsPerDay + gpuSnapshotsPerDay + pingRecordsPerDay,
+    monitor_d1_rows_written_per_day: monitorD1RowsWrittenPerDay,
+    gpu_d1_rows_written_per_day: gpuD1RowsWrittenPerDay,
+    ping_d1_rows_written_per_day: pingD1RowsWrittenPerDay,
+    total_estimated_business_rows_per_day: totalEstimatedBusinessRowsPerDay,
+    total_estimated_writes_per_day: totalEstimatedD1RowsWrittenPerDay,
+    d1_write_multipliers: {
+      monitor_record: MONITOR_RECORD_D1_ROWS_WRITTEN,
+      gpu_snapshot: GPU_SNAPSHOT_D1_ROWS_WRITTEN,
+      ping_snapshot: PING_SNAPSHOT_D1_ROWS_WRITTEN,
+    },
+    ping_result_reports_per_day: pingResultReportsPerDay,
+    agent_ping_task_pulls_per_day: agentPingTaskPullsPerDay,
+    agent_basic_info_reports_per_day: agentBasicInfoReportsPerDay,
+    agent_websocket_connects_per_day: agentWebsocketConnectsPerDay,
+    estimated_worker_requests_per_day: estimatedWorkerRequestsPerDay,
     estimated_monitor_records_retained: estimatedMonitorRecordsRetained,
     estimated_gpu_snapshots_retained: estimatedGpuSnapshotsRetained,
     estimated_ping_records_retained: estimatedPingRecordsRetained,
@@ -1006,7 +1056,12 @@ adminRoutes.get('/ping', async (c) => {
 adminRoutes.post('/ping/add', async (c) => {
   try {
     const body = await c.req.json();
-    const validated = validatePingTaskInput(body, await getAllowedClientIdsForPingTask(c.env.DB, body));
+    const candidate = {
+      ...body,
+      interval: 60,
+      interval_sec: 60,
+    };
+    const validated = validatePingTaskInput(candidate, await getAllowedClientIdsForPingTask(c.env.DB, candidate));
     if (!validated.ok) {
       return c.json({ error: 'Ping 任务校验失败', details: validated.errors }, 400);
     }
@@ -1040,7 +1095,8 @@ adminRoutes.post('/ping/edit', async (c) => {
     const candidate = {
       ...existing,
       ...body,
-      interval_sec: body.interval ?? body.interval_sec ?? existing.interval_sec,
+      interval: 60,
+      interval_sec: 60,
     };
     const validated = validatePingTaskInput(candidate, await getAllowedClientIdsForPingTask(c.env.DB, candidate));
     if (!validated.ok) {
@@ -1146,6 +1202,9 @@ adminRoutes.post('/settings', async (c) => {
     invalidateCapacityEstimateCache();
     if (changedKeys.some((key) => SETTING_SCHEMA[key as keyof typeof SETTING_SCHEMA]?.public)) {
       invalidatePublicMetadataCache();
+    }
+    if (changedKeys.includes('ping_record_persist_interval_sec')) {
+      invalidateAgentPingTaskCache();
     }
     const livePolicySettingsChanged =
       changedKeys.some((key) => LIVE_POLICY_SETTING_KEYS.has(key));
