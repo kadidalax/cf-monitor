@@ -1,0 +1,31 @@
+{
+  "name": "cf-monitor",
+  "version": "2.0.0",
+  "description": "Cloudflare Worker 探针监控系统 - 基于 komari 重构",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "build": "tsc --noEmit",
+    "build:frontend": "npm --prefix ../frontend run build",
+    "predeploy": "npm run build:frontend && npm run build",
+    "deploy": "wrangler deploy",
+    "db:create": "wrangler d1 create cf-monitor-db",
+    "db:migrate:local": "node ./scripts/run-migrations.mjs local",
+    "db:migrate:remote": "node ./scripts/run-migrations.mjs remote",
+    "db:migrate:client-sort:local": "node ./scripts/run-migrations.mjs local",
+    "db:migrate:client-sort:remote": "node ./scripts/run-migrations.mjs remote",
+    "db:indexes:local": "wrangler d1 execute cf-monitor-db --local --file=./migrations/003_query_indexes.sql",
+    "db:indexes:remote": "wrangler d1 execute cf-monitor-db --remote --file=./migrations/003_query_indexes.sql",
+    "db:seed:local": "wrangler d1 execute cf-monitor-db --local --file=./migrations/002_seed_demo.sql",
+    "db:reset:local": "wrangler d1 execute cf-monitor-db --local --file=./migrations/000_reset_local.sql && npm run db:migrate:local && npm run db:seed:local"
+  },
+  "dependencies": {
+    "hono": "^4.0.0",
+    "jose": "^5.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.0.0",
+    "typescript": "^5.0.0",
+    "wrangler": "^4.98.0"
+  }
+}
