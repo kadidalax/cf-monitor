@@ -7,8 +7,8 @@ crons = ["*/10 * * * *"]
 
 [[d1_databases]]
 binding = "DB"
-database_name = "cf-monitor1"
-database_id = "8bd8b3a8-08c1-472f-a367-097f7bd1aa0a"
+database_name = "cf-monitor-db"
+database_id = "6571d29a-848b-4561-b475-2d56d196f9c5"
 
 [[durable_objects.bindings]]
 name = "LIVE_DATA"
