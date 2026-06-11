@@ -5,7 +5,6 @@ export type AgentInstallPlatform = 'linux' | 'windows' | 'macos';
 export type AgentInstallOptions = {
   ghproxy: string;
   downloadProxy: string;
-  releaseTag: string;
   dir: string;
   serviceName: string;
   binaryUrl?: string;
@@ -18,7 +17,6 @@ export type AgentInstallOptions = {
 export const defaultAgentInstallOptions: AgentInstallOptions = {
   ghproxy: '',
   downloadProxy: '',
-  releaseTag: 'v2.0.0',
   dir: '',
   serviceName: '',
   binaryUrl: '',
@@ -29,9 +27,8 @@ export const defaultAgentInstallOptions: AgentInstallOptions = {
 };
 
 export const CF_MONITOR_BRANCH = 'main';
-export const CF_MONITOR_RELEASE_TAG = 'v2.0.0';
 export const CF_MONITOR_AGENT_SCRIPT_BASE = `https://raw.githubusercontent.com/${CF_MONITOR_REPOSITORY}/refs/heads/${CF_MONITOR_BRANCH}/agent`;
-export const CF_MONITOR_RELEASE_BASE = `https://github.com/${CF_MONITOR_REPOSITORY}/releases/${CF_MONITOR_RELEASE_TAG}/download`;
+export const CF_MONITOR_RELEASE_BASE = `https://github.com/${CF_MONITOR_REPOSITORY}/releases/latest/download`;
 
 export function normalizeServerUrl(value: string, fallback: string) {
   const raw = value.trim() || fallback;
@@ -75,7 +72,7 @@ function psQuote(value: string) {
 
 function rootAwareBashPipe(downloadCommand: string, args: string[]) {
   const quotedArgs = args.map(shellQuote).join(' ');
-  return `${downloadCommand} | { if [ "$(id -u)" -eq 0 ]; then bash -s -- ${quotedArgs}; else sudo bash -s -- ${quotedArgs}; fi; }`;
+  return `${downloadCommand} | { SUDO=; [ "$(id -u)" -eq 0 ] || SUDO=sudo; $SUDO bash -s -- ${quotedArgs}; }`;
 }
 
 export function buildAgentInstallCommand({
@@ -95,7 +92,6 @@ export function buildAgentInstallCommand({
 }) {
   const ghproxy = normalizeProxyUrl(options.ghproxy);
   const downloadProxy = normalizeProxyUrl(options.downloadProxy);
-  const releaseTag = options.releaseTag.trim();
   const binaryUrl = options.binaryUrl?.trim();
   const dir = options.dir.trim();
   const serviceName = options.serviceName.trim();
@@ -114,7 +110,6 @@ export function buildAgentInstallCommand({
       if (binaryUrl) args.push('--binary-url', binaryUrl);
       if (ghproxy) args.push('--install-ghproxy', ghproxy);
       if (downloadProxy) args.push('--proxy', downloadProxy);
-      if (releaseTag) args.push('--release-tag', releaseTag);
       if (dir) args.push('--install-dir', dir);
       if (serviceName) args.push('--service-name', serviceName);
       if (mountInclude) args.push('--mount-include', mountInclude);
@@ -133,7 +128,6 @@ export function buildAgentInstallCommand({
       if (binaryUrl) args.push('-BinaryUrl', binaryUrl);
       if (ghproxy) args.push('-InstallGhproxy', ghproxy);
       if (downloadProxy) args.push('-Proxy', downloadProxy);
-      if (releaseTag) args.push('-ReleaseTag', releaseTag);
       if (dir) args.push('-InstallDir', dir);
       if (serviceName) args.push('-ServiceName', serviceName);
       if (mountInclude) args.push('-MountInclude', mountInclude);
@@ -150,7 +144,6 @@ export function buildAgentInstallCommand({
       if (binaryUrl) args.push('--binary-url', binaryUrl);
       if (ghproxy) args.push('--install-ghproxy', ghproxy);
       if (downloadProxy) args.push('--proxy', downloadProxy);
-      if (releaseTag) args.push('--release-tag', releaseTag);
       if (dir) args.push('--install-dir', dir);
       if (serviceName) args.push('--service-name', serviceName);
       if (mountInclude) args.push('--mount-include', mountInclude);

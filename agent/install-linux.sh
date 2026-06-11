@@ -24,8 +24,8 @@ INSTALL_GHPROXY=""
 PROXY=""
 CF_MONITOR_REPOSITORY="kadidalax/cf-monitor"
 CF_MONITOR_BRANCH="main"
-CF_MONITOR_RELEASE_TAG="v2.0.0"
-CF_MONITOR_RELEASE_BASE="https://github.com/${CF_MONITOR_REPOSITORY}/releases/${CF_MONITOR_RELEASE_TAG}/download"
+CF_MONITOR_RELEASE_TAG=""
+CF_MONITOR_RELEASE_BASE="https://github.com/${CF_MONITOR_REPOSITORY}/releases/latest/download"
 MOUNT_INCLUDE=""
 MOUNT_EXCLUDE=""
 NIC_INCLUDE=""
@@ -54,7 +54,7 @@ Options:
                             Komari-compatible alias for --service-name.
   --binary PATH             Existing agent binary.
   --binary-url URL          Download a prebuilt agent binary from this URL.
-  --release-tag TAG         GitHub release tag used for default binary downloads, default: v2.0.0.
+  --release-tag TAG         GitHub release tag used for default binary downloads, default: latest.
   --build-from-source       Build from local source or GitHub source archive. Requires Go.
   --source-url URL          Source archive used with --build-from-source.
   --proxy URL               Proxy used for --binary-url downloads, for example http://127.0.0.1:10808.
@@ -210,13 +210,14 @@ detect_binary_filename() {
 
 set_release_base() {
   if [[ -z "$CF_MONITOR_RELEASE_TAG" ]]; then
-    CF_MONITOR_RELEASE_TAG="v2.0.0"
+    CF_MONITOR_RELEASE_BASE="https://github.com/${CF_MONITOR_REPOSITORY}/releases/latest/download"
+    return
   fi
   if [[ "$CF_MONITOR_RELEASE_TAG" == -* || "$CF_MONITOR_RELEASE_TAG" == *" "* ]]; then
     echo "--release-tag cannot start with - or contain spaces." >&2
     exit 1
   fi
-  CF_MONITOR_RELEASE_BASE="https://github.com/${CF_MONITOR_REPOSITORY}/releases/${CF_MONITOR_RELEASE_TAG}/download"
+  CF_MONITOR_RELEASE_BASE="https://github.com/${CF_MONITOR_REPOSITORY}/releases/download/${CF_MONITOR_RELEASE_TAG}"
 }
 
 default_binary_url() {

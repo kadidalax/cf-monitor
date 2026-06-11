@@ -16,7 +16,7 @@ param(
   [switch]$BuildFromSource,
   [string]$BinaryPath = "",
   [string]$BinaryUrl = "",
-  [string]$ReleaseTag = "v2.0.0",
+  [string]$ReleaseTag = "",
   [string]$Proxy = "",
   [string]$MountInclude = "",
   [string]$MountExclude = "",
@@ -90,12 +90,12 @@ $branch = "main"
 
 function Resolve-ReleaseBase {
   if ([string]::IsNullOrWhiteSpace($ReleaseTag)) {
-    $script:ReleaseTag = "v2.0.0"
+    return "https://github.com/$repository/releases/latest/download"
   }
   if ($ReleaseTag.StartsWith("-") -or $ReleaseTag -match "\s") {
     throw "-ReleaseTag cannot start with - or contain spaces."
   }
-  return "https://github.com/$repository/releases/$ReleaseTag/download"
+  return "https://github.com/$repository/releases/download/$ReleaseTag"
 }
 
 $releaseBase = Resolve-ReleaseBase

@@ -340,7 +340,6 @@ function GenerateCommandDialog({ client, open, onOpenChange }: { client: AdminCl
           <div className="install-options-grid">
             <FieldInput label="GitHub 代理" value={installOptions.ghproxy} onChange={(v) => setOption('ghproxy', v)} placeholder="为空则不使用代理" />
             <FieldInput label="下载代理" value={installOptions.downloadProxy} onChange={(v) => setOption('downloadProxy', v)} placeholder="例如 http://127.0.0.1:10808" />
-            <FieldInput label="Release 标签" value={installOptions.releaseTag} onChange={(v) => setOption('releaseTag', v)} placeholder="例如 v2.0.0" />
             <FieldInput label="安装目录" value={installOptions.dir} onChange={(v) => setOption('dir', v)} placeholder={platform === 'windows' ? 'C:\\Program Files\\CF Monitor' : '/opt/cf-monitor'} />
             <FieldInput label="服务名称" value={installOptions.serviceName} onChange={(v) => setOption('serviceName', v)} placeholder={platform === 'windows' ? 'CFMonitorAgent' : 'cf-monitor-agent'} />
             <FieldInput label="二进制下载地址" value={installOptions.binaryUrl || ''} onChange={(v) => setOption('binaryUrl', v)} placeholder="为空则自动下载预编译二进制" />
