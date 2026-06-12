@@ -40,6 +40,7 @@ import {
 import {
   D1_FREE_RETAINED_ROWS_REFERENCE,
   D1_PAID_RETAINED_ROWS_REFERENCE,
+  D1_ROWS_READ_PER_WRITE_ESTIMATE,
   ESTIMATED_GPU_SNAPSHOT_BYTES,
   ESTIMATED_MONITOR_RECORD_BYTES,
   ESTIMATED_PING_SNAPSHOT_BYTES,
@@ -126,6 +127,8 @@ const DEFAULT_UNIFIED_PING_INTERVAL_SEC = 300;
 const MIN_UNIFIED_PING_INTERVAL_SEC = 60;
 const MAX_UNIFIED_PING_INTERVAL_SEC = 3600;
 const AGENT_BASIC_INFO_REPORTS_PER_DAY = 48;
+const AGENT_AUTH_CACHE_SEC = 15;
+const PUBLIC_CLIENT_REFRESH_INTERVAL_SEC = 60;
 
 type LiveClientMeta = Pick<db.Client, 'uuid' | 'name'> & { hidden?: unknown };
 
@@ -670,6 +673,22 @@ export async function buildCapacityEstimate(database: D1Database, options: { for
     monitorD1RowsWrittenPerDay +
     gpuD1RowsWrittenPerDay +
     pingD1RowsWrittenPerDay;
+  const writeAmplifiedD1RowsReadPerDay =
+    totalEstimatedD1RowsWrittenPerDay * D1_ROWS_READ_PER_WRITE_ESTIMATE;
+  const publicMetadataD1RowsReadPerDay = dailyViewMinutes > 0
+    ? Math.ceil(activeSecondsPerDay / PUBLIC_CLIENT_REFRESH_INTERVAL_SEC) * Math.max(1, clientCount)
+      + Math.ceil(Math.max(1, dailyViewMinutes) / 30) * (Math.max(1, pingTasks.length) + 16)
+    : 0;
+  const agentMonitorAuthD1RowsReadPerDay =
+    Math.ceil(clientCount * activeSecondsPerDay / AGENT_AUTH_CACHE_SEC)
+    + Math.ceil(clientCount * idleSecondsPerDay / Math.max(AGENT_AUTH_CACHE_SEC, effectiveIdleIntervalSec));
+  const agentPingD1RowsReadPerDay = agentPingTaskPullsPerDay + pingResultReportsPerDay;
+  const totalEstimatedD1RowsReadPerDay = Math.ceil(
+    writeAmplifiedD1RowsReadPerDay +
+    publicMetadataD1RowsReadPerDay +
+    agentMonitorAuthD1RowsReadPerDay +
+    agentPingD1RowsReadPerDay,
+  );
 
   const estimatedMonitorRecordsRetained = Math.ceil(monitorRecordsPerDay * recordPreserveHours / 24);
   const estimatedGpuSnapshotsRetained = Math.ceil(gpuSnapshotsPerDay * recordPreserveHours / 24);
@@ -715,10 +734,20 @@ export async function buildCapacityEstimate(database: D1Database, options: { for
     ping_d1_rows_written_per_day: pingD1RowsWrittenPerDay,
     total_estimated_business_rows_per_day: totalEstimatedBusinessRowsPerDay,
     total_estimated_writes_per_day: totalEstimatedD1RowsWrittenPerDay,
+    write_amplified_d1_rows_read_per_day: writeAmplifiedD1RowsReadPerDay,
+    public_metadata_d1_rows_read_per_day: publicMetadataD1RowsReadPerDay,
+    agent_auth_d1_rows_read_per_day: agentMonitorAuthD1RowsReadPerDay,
+    agent_ping_d1_rows_read_per_day: agentPingD1RowsReadPerDay,
+    total_estimated_reads_per_day: totalEstimatedD1RowsReadPerDay,
     d1_write_multipliers: {
       monitor_record: MONITOR_RECORD_D1_ROWS_WRITTEN,
       gpu_snapshot: GPU_SNAPSHOT_D1_ROWS_WRITTEN,
       ping_snapshot: PING_SNAPSHOT_D1_ROWS_WRITTEN,
+    },
+    d1_read_multipliers: {
+      rows_read_per_row_written: D1_ROWS_READ_PER_WRITE_ESTIMATE,
+      agent_auth_cache_sec: AGENT_AUTH_CACHE_SEC,
+      public_client_refresh_interval_sec: PUBLIC_CLIENT_REFRESH_INTERVAL_SEC,
     },
     ping_result_reports_per_day: pingResultReportsPerDay,
     agent_ping_task_pulls_per_day: agentPingTaskPullsPerDay,

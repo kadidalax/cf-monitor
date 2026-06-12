@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import { Badge, Box, Button, Flex, Grid, Text } from '@radix-ui/themes';
-import { Database, Gauge, HardDrive, Save, Server } from 'lucide-react';
+import { Database, Eye, Gauge, HardDrive, Save, Server } from 'lucide-react';
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
 import { useApi } from '../../contexts/AuthContext';
@@ -33,6 +33,11 @@ interface CapacityEstimate {
   ping_d1_rows_written_per_day?: number;
   total_estimated_business_rows_per_day?: number;
   total_estimated_writes_per_day?: number;
+  total_estimated_reads_per_day?: number;
+  write_amplified_d1_rows_read_per_day?: number;
+  public_metadata_d1_rows_read_per_day?: number;
+  agent_auth_d1_rows_read_per_day?: number;
+  agent_ping_d1_rows_read_per_day?: number;
   ping_result_reports_per_day?: number;
   agent_ping_task_pulls_per_day?: number;
   agent_basic_info_reports_per_day?: number;
@@ -65,6 +70,12 @@ interface CapacityEstimate {
   quota_reference?: {
     d1?: {
       rows_written_per_day?: {
+        free?: number;
+        paid_estimate?: number;
+        paid_monthly_included?: number;
+        paid_estimate_note?: string;
+      };
+      rows_read_per_day?: {
         free?: number;
         paid_estimate?: number;
         paid_monthly_included?: number;
@@ -113,6 +124,9 @@ const DEFAULT_DAILY_VIEW_MINUTES = 60;
 const D1_FREE_DAILY_WRITES_FALLBACK = 100_000;
 const D1_PAID_MONTHLY_WRITES_FALLBACK = 50_000_000;
 const D1_PAID_DAILY_WRITES_FALLBACK = Math.floor(50_000_000 / 30);
+const D1_FREE_DAILY_READS_FALLBACK = 5_000_000;
+const D1_PAID_MONTHLY_READS_FALLBACK = 25_000_000_000;
+const D1_PAID_DAILY_READS_FALLBACK = Math.floor(D1_PAID_MONTHLY_READS_FALLBACK / 30);
 const D1_FREE_DATABASE_STORAGE_BYTES = 500 * 1024 * 1024;
 const D1_PAID_DATABASE_STORAGE_BYTES = 10 * 1024 * 1024 * 1024;
 const ESTIMATED_MONITOR_RECORD_BYTES = 420;
@@ -124,6 +138,9 @@ const WORKER_PAID_DAILY_REQUESTS = 10_000_000;
 const MONITOR_RECORD_D1_ROWS_WRITTEN = 3;
 const GPU_SNAPSHOT_D1_ROWS_WRITTEN = 3;
 const PING_SNAPSHOT_D1_ROWS_WRITTEN = 3;
+const D1_ROWS_READ_PER_WRITE_ESTIMATE = 30;
+const AGENT_AUTH_CACHE_SEC = 15;
+const PUBLIC_CLIENT_REFRESH_INTERVAL_SEC = 60;
 
 function clampInteger(value: unknown, fallback: number, min: number, max: number): number {
   const parsed = Number(value);
@@ -396,6 +413,12 @@ export default function SettingsGeneral() {
       D1_PAID_DAILY_WRITES_FALLBACK;
     const d1PaidMonthlyWrites = capacity?.quota_reference?.d1?.rows_written_per_day?.paid_monthly_included ||
       D1_PAID_MONTHLY_WRITES_FALLBACK;
+    const d1FreeDailyReads = capacity?.quota_reference?.d1?.rows_read_per_day?.free ||
+      D1_FREE_DAILY_READS_FALLBACK;
+    const d1PaidDailyReads = capacity?.quota_reference?.d1?.rows_read_per_day?.paid_estimate ||
+      D1_PAID_DAILY_READS_FALLBACK;
+    const d1PaidMonthlyReads = capacity?.quota_reference?.d1?.rows_read_per_day?.paid_monthly_included ||
+      D1_PAID_MONTHLY_READS_FALLBACK;
     const d1PaidStorageBytes = capacity?.quota_reference?.d1?.storage_bytes?.paid_database ||
       D1_PAID_DATABASE_STORAGE_BYTES;
     const workerFreeDailyRequests = capacity?.quota_reference?.workers?.requests_per_day?.free ||
@@ -406,6 +429,13 @@ export default function SettingsGeneral() {
     const gpuD1RowsWrittenPerDay = gpuSnapshotsPerDay * GPU_SNAPSHOT_D1_ROWS_WRITTEN;
     const pingD1RowsWrittenPerDay = pingRowsPerDay * PING_SNAPSHOT_D1_ROWS_WRITTEN;
     const mixedDailyWrites = monitorD1RowsWrittenPerDay + gpuD1RowsWrittenPerDay + pingD1RowsWrittenPerDay;
+    const writeAmplifiedD1RowsReadPerDay = mixedDailyWrites * D1_ROWS_READ_PER_WRITE_ESTIMATE;
+    const publicMetadataD1RowsReadPerDay = dailyViewMinutes > 0
+      ? Math.ceil(activeSecondsPerDay / PUBLIC_CLIENT_REFRESH_INTERVAL_SEC) * Math.max(1, clients)
+        + Math.ceil(Math.max(1, dailyViewMinutes) / 30) * (Math.max(1, (capacity?.ping_tasks || []).length) + 16)
+      : 0;
+    const agentMonitorAuthD1RowsReadPerDay = Math.ceil(clients * activeSecondsPerDay / AGENT_AUTH_CACHE_SEC)
+      + Math.ceil(clients * idleSecondsPerDay / Math.max(AGENT_AUTH_CACHE_SEC, idlePersistIntervalSec));
     const activeDailyWrites = recordEnabled
       ? Math.ceil(clients * 86400 / activePersistIntervalSec) * MONITOR_RECORD_D1_ROWS_WRITTEN
         + Math.ceil(gpuClients * 86400 / activePersistIntervalSec) * GPU_SNAPSHOT_D1_ROWS_WRITTEN
@@ -432,6 +462,13 @@ export default function SettingsGeneral() {
       + pingResultReportsPerDay
       + agentBasicInfoReportsPerDay
       + agentWebsocketConnectsPerDay;
+    const agentPingD1RowsReadPerDay = agentPingTaskPullsPerDay + pingResultReportsPerDay;
+    const mixedDailyReads = Math.ceil(
+      writeAmplifiedD1RowsReadPerDay +
+      publicMetadataD1RowsReadPerDay +
+      agentMonitorAuthD1RowsReadPerDay +
+      agentPingD1RowsReadPerDay,
+    );
     const activeWorkerRequestsPerDay = mixedWorkerRequestsPerDay;
     const idleWorkerRequestsPerDay = mixedWorkerRequestsPerDay;
 
@@ -459,6 +496,11 @@ export default function SettingsGeneral() {
       idleGpuWritesPerDay,
       pingCoveredClients,
       mixedDailyWrites,
+      mixedDailyReads,
+      writeAmplifiedD1RowsReadPerDay,
+      publicMetadataD1RowsReadPerDay,
+      agentMonitorAuthD1RowsReadPerDay,
+      agentPingD1RowsReadPerDay,
       activeDailyWrites,
       idleDailyWrites,
       estimatedRowsRetained,
@@ -470,13 +512,18 @@ export default function SettingsGeneral() {
       d1FreeDailyWrites,
       d1PaidDailyWrites,
       d1PaidMonthlyWrites,
+      d1FreeDailyReads,
+      d1PaidDailyReads,
+      d1PaidMonthlyReads,
       d1PaidStorageBytes,
       workerFreeDailyRequests,
       workerPaidDailyRequests,
       mixedWritePercent: mixedDailyWrites / d1FreeDailyWrites * 100,
+      mixedReadPercent: mixedDailyReads / d1FreeDailyReads * 100,
       activeWritePercent: activeDailyWrites / d1FreeDailyWrites * 100,
       idleWritePercent: idleDailyWrites / d1FreeDailyWrites * 100,
       mixedPaidWritePercent: mixedDailyWrites / d1PaidDailyWrites * 100,
+      mixedPaidReadPercent: mixedDailyReads / d1PaidDailyReads * 100,
       activePaidWritePercent: activeDailyWrites / d1PaidDailyWrites * 100,
       activeWorkerRequestsPerDay,
       idleWorkerRequestsPerDay,
@@ -564,11 +611,11 @@ export default function SettingsGeneral() {
               <Gauge size={16} />
               <Text size="2" weight="bold">配额实时估算</Text>
               <Text size="1" color="gray" className="quota-reference-line">
-                CF Free 总量：D1 写入 {formatInteger(derived.d1FreeDailyWrites)}/天 · Worker {formatInteger(derived.workerFreeDailyRequests)}/天 · D1 存储 {formatBytes(derived.freeStorageBytes)}/库；Paid：D1 写入 {formatInteger(derived.d1PaidMonthlyWrites)}/月 · Worker {formatInteger(derived.workerPaidDailyRequests)}/天 · D1 存储 {formatBytes(derived.d1PaidStorageBytes)}/库
+                CF Free 总量：D1 写入 {formatInteger(derived.d1FreeDailyWrites)}/天 · D1 读取 {formatInteger(derived.d1FreeDailyReads)}/天 · Worker {formatInteger(derived.workerFreeDailyRequests)}/天 · D1 存储 {formatBytes(derived.freeStorageBytes)}/库；Paid：D1 写入 {formatInteger(derived.d1PaidMonthlyWrites)}/月 · D1 读取 {formatInteger(derived.d1PaidMonthlyReads)}/月 · Worker {formatInteger(derived.workerPaidDailyRequests)}/天 · D1 存储 {formatBytes(derived.d1PaidStorageBytes)}/库
               </Text>
             </Flex>
             <Flex align="center" gap="2" wrap="wrap">
-              <Badge variant="soft" color={getPercentTone(Math.max(derived.storagePercent, derived.mixedWritePercent, derived.mixedWorkerPercent))}>
+              <Badge variant="soft" color={getPercentTone(Math.max(derived.storagePercent, derived.mixedWritePercent, derived.mixedReadPercent, derived.mixedWorkerPercent))}>
                 当前输入即时估算
               </Badge>
               <Button size="1" variant="soft" onClick={handleMaintenanceCleanup} disabled={cleaning}>
@@ -576,7 +623,7 @@ export default function SettingsGeneral() {
               </Button>
             </Flex>
           </Flex>
-          <Grid columns={{ initial: '1', sm: '3' }} gap="3">
+          <Grid columns={{ initial: '1', sm: '2', lg: '4' }} gap="3">
             <QuotaBar
               label="D1 预计存储"
               value={formatBytes(derived.estimatedStorageBytes)}
@@ -592,6 +639,13 @@ export default function SettingsGeneral() {
               icon={<HardDrive size={15} />}
             />
             <QuotaBar
+              label="D1 读取/天"
+              value={formatInteger(derived.mixedDailyReads)}
+              percent={derived.mixedReadPercent}
+              caption={`按写入放大、Agent 鉴权和公开元数据刷新估算，Free ${formatInteger(derived.d1FreeDailyReads)}/天；Paid 按月度额度均摊约 ${formatInteger(derived.d1PaidDailyReads)}/天`}
+              icon={<Eye size={15} />}
+            />
+            <QuotaBar
               label="Worker 请求/天"
               value={formatInteger(derived.mixedWorkerRequestsPerDay)}
               percent={derived.mixedWorkerPercent}
@@ -603,9 +657,11 @@ export default function SettingsGeneral() {
             <EstimateMetric label="节点数" value={formatInteger(derived.clients)} />
             <EstimateMetric label="每日观看时间" value={`${derived.dailyViewMinutes} 分钟`} tone="blue" />
             <EstimateMetric label="混合写入/天" value={formatInteger(derived.mixedDailyWrites)} tone="blue" />
+            <EstimateMetric label="D1 读取/天" value={formatInteger(derived.mixedDailyReads)} tone="blue" />
             <EstimateMetric label="经验保留行数" value={formatInteger(derived.estimatedRowsRetained)} tone="purple" />
             <EstimateMetric label="历史高水位" value={`${formatInteger(derived.recordHighWatermarkRows)} 行`} tone={getPercentTone(derived.highWatermarkPercent) === 'red' ? 'red' : 'blue'} />
             <EstimateMetric label="过期待清理" value={formatInteger(derived.expiredBacklogRows)} tone={derived.expiredBacklogRows > 0 ? 'amber' : 'green'} />
+            <EstimateMetric label="读取写入倍率" value={`${D1_ROWS_READ_PER_WRITE_ESTIMATE}x`} tone="purple" />
             <EstimateMetric label="全天有人写入/天" value={formatInteger(derived.activeDailyWrites)} tone="amber" />
             <EstimateMetric label="全天无人写入/天" value={formatInteger(derived.idleDailyWrites)} tone="green" />
             <EstimateMetric label="无人 Worker 请求/天" value={formatInteger(derived.idleWorkerRequestsPerDay)} tone="purple" />
