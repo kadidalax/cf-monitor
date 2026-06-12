@@ -35,10 +35,17 @@ interface CapacityEstimate {
   total_estimated_writes_per_day?: number;
   ping_result_reports_per_day?: number;
   agent_ping_task_pulls_per_day?: number;
+  agent_basic_info_reports_per_day?: number;
+  agent_websocket_connects_per_day?: number;
   estimated_worker_requests_per_day?: number;
   legacy_ping_records_per_day?: number;
   ping_records_saved_per_day?: number;
   ping_storage_mode?: string;
+  ping_tasks?: Array<{
+    id: number;
+    name?: string;
+    target_client_count?: number;
+  }>;
   d1_reference_rows?: {
     free_warning_rows?: number;
     paid_warning_rows?: number;
@@ -104,8 +111,10 @@ const DEFAULT_PING_RECORD_PERSIST_SEC = 300;
 const DEFAULT_RECORD_HIGH_WATERMARK_ROWS = 450_000;
 const DEFAULT_DAILY_VIEW_MINUTES = 60;
 const D1_FREE_DAILY_WRITES_FALLBACK = 100_000;
+const D1_PAID_MONTHLY_WRITES_FALLBACK = 50_000_000;
 const D1_PAID_DAILY_WRITES_FALLBACK = Math.floor(50_000_000 / 30);
 const D1_FREE_DATABASE_STORAGE_BYTES = 500 * 1024 * 1024;
+const D1_PAID_DATABASE_STORAGE_BYTES = 10 * 1024 * 1024 * 1024;
 const ESTIMATED_MONITOR_RECORD_BYTES = 420;
 const ESTIMATED_GPU_SNAPSHOT_BYTES = 420;
 const ESTIMATED_PING_RECORD_BYTES = 160;
@@ -158,6 +167,30 @@ function sumRowCounts(counts: CapacityEstimate['expired_row_counts']): number {
     + Number(counts.ping_records || 0)
     + Number(counts.ping_snapshots || 0)
     + Number(counts.audit_logs || 0);
+}
+
+function dailySamplesPerClient(intervalSec: number): number {
+  return intervalSec > 0 ? Math.ceil(86400 / intervalSec) : 0;
+}
+
+function inferPingCoveredClients(capacity: CapacityEstimate | null, clients: number, intervalSec: number): number {
+  const pingTasks = capacity?.ping_tasks || [];
+  if (clients <= 0 || pingTasks.length === 0) return 0;
+
+  const aggregateReportsPerDay = Math.max(
+    0,
+    Number(capacity?.ping_result_reports_per_day || capacity?.ping_records_per_day || 0),
+  );
+  const rowsPerClient = dailySamplesPerClient(intervalSec);
+  if (aggregateReportsPerDay > 0 && rowsPerClient > 0) {
+    return Math.min(clients, Math.max(0, Math.round(aggregateReportsPerDay / rowsPerClient)));
+  }
+
+  const summedTaskTargets = pingTasks.reduce(
+    (sum, task) => sum + Math.max(0, Number(task.target_client_count || 0)),
+    0,
+  );
+  return Math.min(clients, summedTaskTargets);
 }
 
 function EstimateMetric({
@@ -255,8 +288,6 @@ export default function SettingsGeneral() {
   const derived = useMemo(() => {
     const clients = Math.max(0, Number(capacity?.clients || 0));
     const gpuClients = Math.max(0, Number(capacity?.gpu_clients || 0));
-    const gpuRowsPerDay = Math.max(0, Number(capacity?.gpu_snapshots_per_day || 0));
-    const pingRowsPerDay = Math.max(0, Number(capacity?.ping_records_per_day || 0));
     const expiredBacklogRows = sumRowCounts(capacity?.expired_row_counts);
     const retentionHours = clampInteger(
       settings.record_preserve_time || settings.ping_record_preserve_time,
@@ -295,6 +326,12 @@ export default function SettingsGeneral() {
       60,
       3600,
     );
+    const capacityPingRecordPersistIntervalSec = clampInteger(
+      capacity?.ping_record_persist_interval_sec,
+      DEFAULT_PING_RECORD_PERSIST_SEC,
+      60,
+      3600,
+    );
     const recordHighWatermarkRows = clampInteger(
       settings.record_high_watermark_rows,
       Number(capacity?.record_high_watermark_rows || DEFAULT_RECORD_HIGH_WATERMARK_ROWS),
@@ -325,14 +362,17 @@ export default function SettingsGeneral() {
     const idleGpuWritesPerDay = recordEnabled && idleSecondsPerDay > 0
       ? Math.ceil(gpuClients * idleSecondsPerDay / idlePersistIntervalSec)
       : 0;
-    const fallbackGpuWritesPerDay = activeGpuWritesPerDay + idleGpuWritesPerDay;
-    const effectiveGpuRowsPerDay = gpuRowsPerDay || fallbackGpuWritesPerDay;
-    const estimatedRowsRetained = Number(capacity?.estimated_rows_retained || 0) ||
-      Math.ceil((monitorWritesPerDay + effectiveGpuRowsPerDay + pingRowsPerDay) * retentionHours / 24);
+    const gpuSnapshotsPerDay = activeGpuWritesPerDay + idleGpuWritesPerDay;
+    const pingCoveredClients = inferPingCoveredClients(capacity, clients, capacityPingRecordPersistIntervalSec);
+    const pingRowsPerClientPerDay = dailySamplesPerClient(pingRecordPersistIntervalSec);
+    const pingRowsPerDay = recordEnabled
+      ? pingCoveredClients * pingRowsPerClientPerDay
+      : 0;
+    const pingResultReportsPerDay = pingCoveredClients * pingRowsPerClientPerDay;
     const estimatedMonitorRowsRetained = Math.ceil(monitorWritesPerDay * retentionHours / 24);
-    const estimatedGpuRowsRetained = Number(capacity?.estimated_gpu_snapshots_retained || 0) ||
-      Math.ceil(effectiveGpuRowsPerDay * retentionHours / 24);
+    const estimatedGpuRowsRetained = Math.ceil(gpuSnapshotsPerDay * retentionHours / 24);
     const estimatedPingRowsRetained = Math.ceil(pingRowsPerDay * retentionHours / 24);
+    const estimatedRowsRetained = estimatedMonitorRowsRetained + estimatedGpuRowsRetained + estimatedPingRowsRetained;
     const freeRowReference = capacity?.quota_reference?.d1?.retained_rows_reference?.free ||
       capacity?.quota_reference?.d1?.retained_rows_warning?.free ||
       capacity?.d1_reference_rows?.free_reference_rows ||
@@ -347,45 +387,58 @@ export default function SettingsGeneral() {
     const pingRecordBytes = capacity?.quota_reference?.d1?.estimated_row_bytes?.ping_snapshot ||
       capacity?.quota_reference?.d1?.estimated_row_bytes?.ping_record ||
       (capacity?.ping_storage_mode === 'snapshots' ? ESTIMATED_PING_SNAPSHOT_BYTES : ESTIMATED_PING_RECORD_BYTES);
-    const estimatedStorageBytes = Number(capacity?.estimated_storage_bytes || 0) ||
-      estimatedMonitorRowsRetained * monitorRecordBytes + estimatedGpuRowsRetained * gpuSnapshotBytes + estimatedPingRowsRetained * pingRecordBytes;
+    const estimatedStorageBytes = estimatedMonitorRowsRetained * monitorRecordBytes
+      + estimatedGpuRowsRetained * gpuSnapshotBytes
+      + estimatedPingRowsRetained * pingRecordBytes;
     const d1FreeDailyWrites = capacity?.quota_reference?.d1?.rows_written_per_day?.free ||
       D1_FREE_DAILY_WRITES_FALLBACK;
     const d1PaidDailyWrites = capacity?.quota_reference?.d1?.rows_written_per_day?.paid_estimate ||
       D1_PAID_DAILY_WRITES_FALLBACK;
+    const d1PaidMonthlyWrites = capacity?.quota_reference?.d1?.rows_written_per_day?.paid_monthly_included ||
+      D1_PAID_MONTHLY_WRITES_FALLBACK;
+    const d1PaidStorageBytes = capacity?.quota_reference?.d1?.storage_bytes?.paid_database ||
+      D1_PAID_DATABASE_STORAGE_BYTES;
     const workerFreeDailyRequests = capacity?.quota_reference?.workers?.requests_per_day?.free ||
       WORKER_FREE_DAILY_REQUESTS;
     const workerPaidDailyRequests = capacity?.quota_reference?.workers?.requests_per_day?.paid_included ||
       WORKER_PAID_DAILY_REQUESTS;
-    const monitorD1RowsWrittenPerDay = Number(capacity?.monitor_d1_rows_written_per_day || 0) ||
-      monitorWritesPerDay * MONITOR_RECORD_D1_ROWS_WRITTEN;
-    const gpuD1RowsWrittenPerDay = Number(capacity?.gpu_d1_rows_written_per_day || 0) ||
-      effectiveGpuRowsPerDay * GPU_SNAPSHOT_D1_ROWS_WRITTEN;
-    const pingD1RowsWrittenPerDay = Number(capacity?.ping_d1_rows_written_per_day || 0) ||
-      pingRowsPerDay * PING_SNAPSHOT_D1_ROWS_WRITTEN;
-    const mixedDailyWrites = Number(capacity?.total_estimated_writes_per_day || 0) ||
-      monitorD1RowsWrittenPerDay + gpuD1RowsWrittenPerDay + pingD1RowsWrittenPerDay;
-    const activeDailyWrites = Math.ceil(clients * 86400 / activePersistIntervalSec) * MONITOR_RECORD_D1_ROWS_WRITTEN
-      + Math.ceil(gpuClients * 86400 / activePersistIntervalSec) * GPU_SNAPSHOT_D1_ROWS_WRITTEN
-      + pingD1RowsWrittenPerDay;
-    const idleDailyWrites = Math.ceil(clients * 86400 / idlePersistIntervalSec) * MONITOR_RECORD_D1_ROWS_WRITTEN
-      + Math.ceil(gpuClients * 86400 / idlePersistIntervalSec) * GPU_SNAPSHOT_D1_ROWS_WRITTEN
-      + pingD1RowsWrittenPerDay;
-    const pingResultReportsPerDay = Math.max(0, Number(capacity?.ping_result_reports_per_day || pingRowsPerDay));
-    const fallbackPingTaskPollSec = pingRowsPerDay > 0 ? pingRecordPersistIntervalSec : 600;
-    const agentPingTaskPullsPerDay = Math.max(
-      0,
-      Number(capacity?.agent_ping_task_pulls_per_day || Math.ceil(clients * 86400 / fallbackPingTaskPollSec)),
+    const monitorD1RowsWrittenPerDay = monitorWritesPerDay * MONITOR_RECORD_D1_ROWS_WRITTEN;
+    const gpuD1RowsWrittenPerDay = gpuSnapshotsPerDay * GPU_SNAPSHOT_D1_ROWS_WRITTEN;
+    const pingD1RowsWrittenPerDay = pingRowsPerDay * PING_SNAPSHOT_D1_ROWS_WRITTEN;
+    const mixedDailyWrites = monitorD1RowsWrittenPerDay + gpuD1RowsWrittenPerDay + pingD1RowsWrittenPerDay;
+    const activeDailyWrites = recordEnabled
+      ? Math.ceil(clients * 86400 / activePersistIntervalSec) * MONITOR_RECORD_D1_ROWS_WRITTEN
+        + Math.ceil(gpuClients * 86400 / activePersistIntervalSec) * GPU_SNAPSHOT_D1_ROWS_WRITTEN
+        + pingD1RowsWrittenPerDay
+      : 0;
+    const idleDailyWrites = recordEnabled
+      ? Math.ceil(clients * 86400 / idlePersistIntervalSec) * MONITOR_RECORD_D1_ROWS_WRITTEN
+        + Math.ceil(gpuClients * 86400 / idlePersistIntervalSec) * GPU_SNAPSHOT_D1_ROWS_WRITTEN
+        + pingD1RowsWrittenPerDay
+      : 0;
+    const hasPingTasks = (capacity?.ping_tasks || []).length > 0;
+    const agentPingTaskPullsPerDay = Math.ceil(
+      clients * 86400 / (hasPingTasks ? pingRecordPersistIntervalSec : 600),
     );
-    const fallbackWorkerRequestsPerDay = agentPingTaskPullsPerDay + pingResultReportsPerDay + clients * 49;
-    const mixedWorkerRequestsPerDay = Math.max(0, Number(capacity?.estimated_worker_requests_per_day || fallbackWorkerRequestsPerDay));
+    const agentBasicInfoReportsPerDay = Math.max(
+      0,
+      Number(capacity?.agent_basic_info_reports_per_day || clients * 48),
+    );
+    const agentWebsocketConnectsPerDay = Math.max(
+      0,
+      Number(capacity?.agent_websocket_connects_per_day || clients),
+    );
+    const mixedWorkerRequestsPerDay = agentPingTaskPullsPerDay
+      + pingResultReportsPerDay
+      + agentBasicInfoReportsPerDay
+      + agentWebsocketConnectsPerDay;
     const activeWorkerRequestsPerDay = mixedWorkerRequestsPerDay;
     const idleWorkerRequestsPerDay = mixedWorkerRequestsPerDay;
 
     return {
       clients,
       gpuClients,
-      gpuWritesPerDay: effectiveGpuRowsPerDay,
+      gpuWritesPerDay: gpuSnapshotsPerDay,
       pingWritesPerDay: pingD1RowsWrittenPerDay,
       pingRowsPerDay,
       expiredBacklogRows,
@@ -404,6 +457,7 @@ export default function SettingsGeneral() {
       idleMonitorWritesPerDay,
       activeGpuWritesPerDay,
       idleGpuWritesPerDay,
+      pingCoveredClients,
       mixedDailyWrites,
       activeDailyWrites,
       idleDailyWrites,
@@ -415,6 +469,10 @@ export default function SettingsGeneral() {
       freeStorageBytes,
       d1FreeDailyWrites,
       d1PaidDailyWrites,
+      d1PaidMonthlyWrites,
+      d1PaidStorageBytes,
+      workerFreeDailyRequests,
+      workerPaidDailyRequests,
       mixedWritePercent: mixedDailyWrites / d1FreeDailyWrites * 100,
       activeWritePercent: activeDailyWrites / d1FreeDailyWrites * 100,
       idleWritePercent: idleDailyWrites / d1FreeDailyWrites * 100,
@@ -486,7 +544,7 @@ export default function SettingsGeneral() {
 
   const headerAction = useMemo(() => (
     <Button onClick={handleSave} disabled={loading || saving}>
-      <Save size={16} /> {saving ? '保存中...' : '保存'}
+      <Save size={16} /> {saving ? '保存中…' : '保存'}
     </Button>
   ), [handleSave, loading, saving]);
 
@@ -502,16 +560,19 @@ export default function SettingsGeneral() {
       <SettingCard title="采集与记录策略" description="统一设置 Agent 采集、历史记录、D1 与 Worker 配额估算" defaultOpen>
         <Box className="quota-estimate-panel">
           <Flex align="center" justify="between" gap="3" wrap="wrap" mb="3">
-            <Flex align="center" gap="2">
+            <Flex align="center" gap="2" wrap="wrap" style={{ minWidth: 0 }}>
               <Gauge size={16} />
               <Text size="2" weight="bold">配额实时估算</Text>
+              <Text size="1" color="gray" className="quota-reference-line">
+                CF Free 总量：D1 写入 {formatInteger(derived.d1FreeDailyWrites)}/天 · Worker {formatInteger(derived.workerFreeDailyRequests)}/天 · D1 存储 {formatBytes(derived.freeStorageBytes)}/库；Paid：D1 写入 {formatInteger(derived.d1PaidMonthlyWrites)}/月 · Worker {formatInteger(derived.workerPaidDailyRequests)}/天 · D1 存储 {formatBytes(derived.d1PaidStorageBytes)}/库
+              </Text>
             </Flex>
             <Flex align="center" gap="2" wrap="wrap">
               <Badge variant="soft" color={getPercentTone(Math.max(derived.storagePercent, derived.mixedWritePercent, derived.mixedWorkerPercent))}>
                 当前输入即时估算
               </Badge>
               <Button size="1" variant="soft" onClick={handleMaintenanceCleanup} disabled={cleaning}>
-                <Database size={13} /> {cleaning ? '清理中...' : '维护清理'}
+                <Database size={13} /> {cleaning ? '清理中…' : '维护清理'}
               </Button>
             </Flex>
           </Flex>

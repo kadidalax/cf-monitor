@@ -296,14 +296,14 @@ export default function NodeTable({ nodes, liveData }: NodeTableProps) {
         className="node-table-root"
         variant="surface"
         size="1"
-        style={{ width: '100%', minWidth: 1040, tableLayout: 'fixed' }}
+        style={{ width: '100%', minWidth: 1066, tableLayout: 'fixed' }}
       >
         <Table.Header>
           <Table.Row>
             <Table.ColumnHeaderCell style={{ width: 36 }} />
             <SortHeader column="name" style={{ width: 148 }}>名称</SortHeader>
             <SortHeader column="os" style={{ width: 116 }}>系统</SortHeader>
-            <SortHeader column="status" style={{ width: 78 }}>状态</SortHeader>
+            <SortHeader column="status" style={{ width: 104 }}>状态</SortHeader>
             <SortHeader column="cpu" style={{ width: 82 }}>CPU</SortHeader>
             <SortHeader column="ram" style={{ width: 82 }}>内存</SortHeader>
             <SortHeader column="disk" style={{ width: 82 }}>硬盘</SortHeader>
@@ -321,6 +321,7 @@ export default function NodeTable({ nodes, liveData }: NodeTableProps) {
             const ramPct = formatPercent(live?.ram || 0, node.mem_total);
             const diskPct = formatPercent(live?.disk || 0, node.disk_total);
             const isExpanded = expandedRows.includes(node.uuid);
+            const uptimeLabel = formatUptime(live?.uptime || 0);
 
             return (
               <React.Fragment key={node.uuid}>
@@ -361,13 +362,15 @@ export default function NodeTable({ nodes, liveData }: NodeTableProps) {
                       <Text size="2" truncate style={{ maxWidth: 82 }}>{getOSName(node.os)}</Text>
                     </Flex>
                   </Table.Cell>
-                  <Table.Cell>
+                  <Table.Cell className="node-table-status-cell">
                     <Flex direction="column" gap="1" align="start">
                       <Badge color={isOnline ? 'green' : 'red'} variant="soft" size="1">
                         {isOnline ? '在线' : '离线'}
                       </Badge>
                       {isOnline && (
-                        <Text size="1" color="gray">{formatUptime(live?.uptime || 0)}</Text>
+                        <Text size="1" color="gray" className="node-uptime-nowrap" title={uptimeLabel}>
+                          {uptimeLabel}
+                        </Text>
                       )}
                     </Flex>
                   </Table.Cell>

@@ -151,7 +151,7 @@ function NetworkSummary({
         </Text>
         <div className="node-network-summary-values node-network-uptime-values">
           <span className="node-network-value node-network-uptime-value">
-            <strong>{uptimeLabel}</strong>
+            <strong className="node-uptime-nowrap" title={uptimeLabel}>{uptimeLabel}</strong>
           </span>
         </div>
       </div>

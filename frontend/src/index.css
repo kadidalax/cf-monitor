@@ -962,6 +962,7 @@ body {
 }
 
 .node-network-value strong {
+  display: block;
   min-width: 0;
   max-width: 100%;
   text-align: center;
@@ -987,6 +988,21 @@ body {
 
 .node-network-value.is-down {
   color: var(--monitor-secondary, var(--blue-11));
+}
+
+.node-uptime-nowrap {
+  display: inline-block;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: top;
+  font-variant-numeric: tabular-nums;
+}
+
+.node-table-status-cell .node-uptime-nowrap {
+  font-family: var(--font-mono);
+  line-height: 1.1 !important;
 }
 
 /* ========== Monitor display theme ========== */
@@ -1609,6 +1625,12 @@ html[data-monitor-theme='next'] .node-network-value strong {
   border: 1px solid var(--monitor-border);
   border-radius: 8px;
   background: var(--monitor-panel-strong);
+}
+
+.quota-reference-line {
+  min-width: min(100%, 320px);
+  overflow-wrap: anywhere;
+  line-height: 1.5;
 }
 
 .quota-estimate-icon {
