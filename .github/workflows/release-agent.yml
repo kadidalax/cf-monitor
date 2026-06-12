@@ -1,9 +1,8 @@
-name: Release Agent
+name: Build Agent
 
 on:
   push:
-    tags:
-      - 'v*'
+  pull_request:
   workflow_dispatch:
     inputs:
       tag:
@@ -40,21 +39,37 @@ jobs:
         shell: bash
         run: |
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            if [[ "${GITHUB_REF_NAME}" == v* ]]; then
+              release_tag="${GITHUB_REF_NAME}"
+              echo "tag=${release_tag}" >> "$GITHUB_OUTPUT"
+              echo "version=${release_tag#v}" >> "$GITHUB_OUTPUT"
+              echo "publish=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "tag=" >> "$GITHUB_OUTPUT"
+              echo "version=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+            fi
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            release_tag="${{ inputs.tag }}"
+            echo "tag=${release_tag}" >> "$GITHUB_OUTPUT"
+            echo "version=${release_tag#v}" >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
           else
-            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            echo "version=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Build agent binaries
         shell: bash
         env:
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          AGENT_VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
           mkdir -p dist
-          agent_version="${RELEASE_TAG#v}"
+          agent_version="${AGENT_VERSION}"
           if [[ -z "$agent_version" ]]; then
-            echo "Cannot derive agent version from release tag: ${RELEASE_TAG}" >&2
+            echo "Cannot derive agent version." >&2
             exit 1
           fi
           ldflags="-s -w -X main.Version=${agent_version}"
@@ -74,10 +89,15 @@ jobs:
           build darwin arm64 cf-monitor-agent-darwin-arm64
           build windows amd64 cf-monitor-agent-windows-amd64.exe
 
-          cd dist
-          sha256sum * > checksums.txt
+      - name: Upload agent artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cf-monitor-agent-${{ github.sha }}
+          path: agent/dist/*
+          if-no-files-found: error
 
       - name: Publish GitHub release
+        if: steps.release.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
