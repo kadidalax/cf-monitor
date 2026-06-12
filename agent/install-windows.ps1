@@ -16,7 +16,7 @@ param(
   [switch]$BuildFromSource,
   [string]$BinaryPath = "",
   [string]$BinaryUrl = "",
-  [string]$ReleaseTag = "",
+  [string]$ReleaseTag = "agent-latest",
   [string]$Proxy = "",
   [string]$MountInclude = "",
   [string]$MountExclude = "",
@@ -90,7 +90,7 @@ $branch = "main"
 
 function Resolve-ReleaseBase {
   if ([string]::IsNullOrWhiteSpace($ReleaseTag)) {
-    return "https://github.com/$repository/releases/latest/download"
+    return "https://github.com/$repository/releases/download/agent-latest"
   }
   if ($ReleaseTag.StartsWith("-") -or $ReleaseTag -match "\s") {
     throw "-ReleaseTag cannot start with - or contain spaces."
