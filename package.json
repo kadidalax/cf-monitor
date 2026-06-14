@@ -1,0 +1,21 @@
+{
+  "name": "cf-monitor-monorepo",
+  "private": true,
+  "version": "2.0.0",
+  "type": "module",
+  "workspaces": [
+    "frontend",
+    "worker"
+  ],
+  "scripts": {
+    "build": "npm --prefix frontend run build && npm --prefix worker run build",
+    "verify": "npm run build",
+    "deploy": "npm run build && node ./worker/node_modules/wrangler/bin/wrangler.js deploy --config wrangler.toml",
+    "dev:worker": "npm --prefix worker run dev",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "db:create": "npm --prefix worker run db:create",
+    "db:migrate:local": "npm --prefix worker run db:migrate:local",
+    "db:migrate:remote": "npm --prefix worker run db:migrate:remote",
+    "db:reset:local": "npm --prefix worker run db:reset:local"
+  }
+}

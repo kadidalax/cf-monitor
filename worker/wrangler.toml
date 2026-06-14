@@ -1,0 +1,36 @@
+name = "cf-monitor1"
+main = "src/index.ts"
+compatibility_date = "2025-04-01"
+
+[triggers]
+crons = ["*/10 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "cf-monitor-db"
+database_id = "6571d29a-848b-4561-b475-2d56d196f9c5"
+
+[[durable_objects.bindings]]
+name = "LIVE_DATA"
+class_name = "LiveDataDO"
+
+[[durable_objects.bindings]]
+name = "RATE_LIMIT"
+class_name = "RateLimitDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["LiveDataDO"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["RateLimitDO"]
+
+[vars]
+SITE_TITLE = "CF Monitor"
+SITE_DESCRIPTION = "Server monitor probe"
+
+[assets]
+directory = "../frontend/dist"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*", "/ping"]

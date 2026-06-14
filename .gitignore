@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+worker/node_modules/
+
+# Build outputs
+frontend/dist/
+worker/dist/
+worker/.tmp/
+release/
+*.tsbuildinfo
+
+# Cloudflare local state and secrets
+.wrangler/
+worker/.wrangler/
+worker/.dev.vars
+.dev.vars
+
+# Test and preview artifacts
+coverage/
+playwright-report/
+test-results/
+design-previews/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Generated binaries
+*.exe
+agent/cf-monitor-agent.exe

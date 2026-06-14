@@ -1,0 +1,79 @@
+name: Agent Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agent-release
+  cancel-in-progress: true
+
+env:
+  AGENT_RELEASE_TAG: agent-latest
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  release-agent:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent
+    env:
+      CGO_ENABLED: '0'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: agent/go.mod
+          cache-dependency-path: agent/go.sum
+
+      - name: Build agent binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          agent_version="${GITHUB_SHA::7}"
+          ldflags="-s -w -X main.Version=${agent_version}"
+          echo "Embedding agent version ${agent_version}"
+
+          build() {
+            local goos="$1"
+            local goarch="$2"
+            local output="$3"
+            echo "Building ${output}"
+            GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="$ldflags" -o "dist/${output}" .
+          }
+
+          build linux amd64 cf-monitor-agent-linux-amd64
+          build linux arm64 cf-monitor-agent-linux-arm64
+          build darwin amd64 cf-monitor-agent-darwin-amd64
+          build darwin arm64 cf-monitor-agent-darwin-arm64
+          build windows amd64 cf-monitor-agent-windows-amd64.exe
+
+      - name: Publish installable agent release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_notes="Updated from ${GITHUB_REPOSITORY}@${GITHUB_SHA}."
+
+          if gh release view "$AGENT_RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$AGENT_RELEASE_TAG" \
+              --title "CF Monitor Agent Latest" \
+              --notes "$release_notes"
+          else
+            gh release create "$AGENT_RELEASE_TAG" \
+              --title "CF Monitor Agent Latest" \
+              --notes "$release_notes"
+          fi
+
+          gh release upload "$AGENT_RELEASE_TAG" dist/* --clobber
