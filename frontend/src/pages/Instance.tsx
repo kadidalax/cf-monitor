@@ -177,7 +177,6 @@ export default function Instance() {
             实时数据推送已停止，请刷新页面重新连接
           </p>
           <button
-            type="button"
             onClick={() => window.location.reload()}
             className="px-6 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-md transition-colors"
           >

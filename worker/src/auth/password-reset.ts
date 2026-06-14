@@ -8,6 +8,19 @@
 
 import { hashPassword } from './password';
 
+const RESET_TOKEN_BYTES = 32;
+
+function randomHex(byteLength: number): string {
+  const bytes = new Uint8Array(byteLength);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function hashResetToken(token: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
 /**
  * 检查并执行环境变量密码重置
  *
@@ -111,4 +124,106 @@ export function validatePasswordStrength(password: string): string | null {
   }
 
   return null;
+}
+
+/**
+ * 生成密码重置令牌（用于未来的邮箱重置功能）
+ */
+export function generateResetToken(): string {
+  return `rst_${randomHex(RESET_TOKEN_BYTES)}`;
+}
+
+/**
+ * 密码重置令牌管理（预留接口）
+ */
+export interface PasswordResetToken {
+  tokenHash: string;
+  userId: string;
+  email: string;
+  expiresAt: string;
+  used: boolean;
+}
+
+/**
+ * 创建密码重置令牌（预留）
+ */
+export async function createPasswordResetToken(
+  db: D1Database,
+  userId: string,
+  email: string,
+  validityMinutes = 30,
+): Promise<string> {
+  const token = generateResetToken();
+  const tokenHash = await hashResetToken(token);
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + validityMinutes * 60 * 1000).toISOString();
+
+  await db.prepare(`
+    INSERT INTO password_reset_tokens (token_hash, user_id, email, expires_at, used, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 0, ?, ?)
+  `).bind(tokenHash, userId, email, expiresAt, now.toISOString(), now.toISOString()).run();
+
+  return token;
+}
+
+/**
+ * 验证密码重置令牌（预留）
+ */
+export async function verifyPasswordResetToken(
+  db: D1Database,
+  token: string,
+): Promise<{ valid: boolean; userId?: string; error?: string }> {
+  const tokenHash = await hashResetToken(token);
+  const result = await db.prepare(`
+    SELECT user_id, expires_at, used
+    FROM password_reset_tokens
+    WHERE token_hash = ?
+  `).bind(tokenHash).first<{ user_id: string; expires_at: string; used: number }>();
+
+  if (!result) {
+    return { valid: false, error: '无效的重置令牌' };
+  }
+
+  if (result.used) {
+    return { valid: false, error: '重置令牌已使用' };
+  }
+
+  const expiresAt = new Date(result.expires_at).getTime();
+  const now = Date.now();
+
+  if (now > expiresAt) {
+    return { valid: false, error: '重置令牌已过期' };
+  }
+
+  return { valid: true, userId: result.user_id };
+}
+
+/**
+ * 标记令牌为已使用（预留）
+ */
+export async function markTokenAsUsed(
+  db: D1Database,
+  token: string,
+): Promise<void> {
+  const tokenHash = await hashResetToken(token);
+  await db.prepare(`
+    UPDATE password_reset_tokens
+    SET used = 1, updated_at = datetime('now')
+    WHERE token_hash = ?
+  `).bind(tokenHash).run();
+}
+
+/**
+ * 清理过期的重置令牌（预留）
+ */
+export async function cleanupExpiredResetTokens(
+  db: D1Database,
+): Promise<number> {
+  const result = await db.prepare(`
+    DELETE FROM password_reset_tokens
+    WHERE expires_at < datetime('now')
+       OR (used = 1 AND updated_at < datetime('now', '-7 days'))
+  `).run();
+
+  return result.meta.changes || 0;
 }

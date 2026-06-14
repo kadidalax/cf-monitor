@@ -26,6 +26,8 @@ param(
   [string]$MountExclude = "",
   [string]$NicInclude = "",
   [string]$NicExclude = "",
+  [switch]$AllowLocalPingTargets,
+  [switch]$BlockPrivatePingTargets,
   [switch]$DisableWebSsh,
   [switch]$DisableAutoUpdate,
   [switch]$IgnoreUnsafeCert,
@@ -457,6 +459,9 @@ if ($DryRun) {
 New-Item -ItemType Directory -Force $InstallDir | Out-Null
 Copy-Item $BinaryPath $targetExe -Force
 
+$allowLocalPingTargetsValue = if ($AllowLocalPingTargets) { "1" } else { "0" }
+$blockPrivatePingTargetsValue = if ($BlockPrivatePingTargets) { "1" } else { "0" }
+
 $runnerContent = @"
 `$ErrorActionPreference = "Stop"
 `$env:CF_MONITOR_SERVER = $(ConvertTo-PowerShellLiteral $Server)
@@ -467,6 +472,8 @@ $runnerContent = @"
 `$env:CF_MONITOR_MOUNT_EXCLUDE = $(ConvertTo-PowerShellLiteral $MountExclude)
 `$env:CF_MONITOR_NIC_INCLUDE = $(ConvertTo-PowerShellLiteral $NicInclude)
 `$env:CF_MONITOR_NIC_EXCLUDE = $(ConvertTo-PowerShellLiteral $NicExclude)
+`$env:CF_MONITOR_ALLOW_LOCAL_PING_TARGETS = $(ConvertTo-PowerShellLiteral $allowLocalPingTargetsValue)
+`$env:CF_MONITOR_BLOCK_PRIVATE_PING_TARGETS = $(ConvertTo-PowerShellLiteral $blockPrivatePingTargetsValue)
 
 & "`$PSScriptRoot\cf-monitor-agent.exe" --interval $Interval --ping-interval $PingInterval
 exit `$LASTEXITCODE

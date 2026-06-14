@@ -3,7 +3,7 @@
  * Provides collapsible sections with consistent styling
  */
 import React, { useState } from 'react';
-import { Card, Flex, Text, Switch, TextField } from '@radix-ui/themes';
+import { Card, Flex, Text, Switch, TextField, TextArea } from '@radix-ui/themes';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 
 /* ========== Collapsible SettingCard ========== */

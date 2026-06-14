@@ -6,8 +6,9 @@ import {
   tokenPrefix,
 } from '../utils/agent-token';
 
-const SCHEMA_BOOTSTRAP_VERSION = '2026-06-13-client-report-interval-v1';
+const SCHEMA_BOOTSTRAP_VERSION = '2026-06-14-password-reset-tokens-v1';
 const SCHEMA_BOOTSTRAP_KEY = 'schema_bootstrap_version';
+const BOOTSTRAP_BATCH_SAFE_STATEMENT_LIMIT = 900;
 
 const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS clients (
@@ -75,6 +76,81 @@ const SCHEMA_STATEMENTS = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_records_client_time ON records(client, time)`,
   `CREATE INDEX IF NOT EXISTS idx_records_time ON records(time)`,
+  `CREATE TABLE IF NOT EXISTS latest_records (
+    client TEXT PRIMARY KEY,
+    time TEXT NOT NULL,
+    cpu REAL DEFAULT 0,
+    gpu REAL DEFAULT 0,
+    ram INTEGER DEFAULT 0,
+    ram_total INTEGER DEFAULT 0,
+    swap INTEGER DEFAULT 0,
+    swap_total INTEGER DEFAULT 0,
+    load REAL DEFAULT 0,
+    temp REAL DEFAULT 0,
+    disk INTEGER DEFAULT 0,
+    disk_total INTEGER DEFAULT 0,
+    net_in INTEGER DEFAULT 0,
+    net_out INTEGER DEFAULT 0,
+    net_total_up INTEGER DEFAULT 0,
+    net_total_down INTEGER DEFAULT 0,
+    process_count INTEGER DEFAULT 0,
+    connections INTEGER DEFAULT 0,
+    connections_udp INTEGER DEFAULT 0,
+    uptime INTEGER DEFAULT 0
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_latest_records_time ON latest_records(time)`,
+  `INSERT OR REPLACE INTO latest_records (
+    client, time, cpu, gpu, ram, ram_total, swap, swap_total, load, temp,
+    disk, disk_total, net_in, net_out, net_total_up, net_total_down,
+    process_count, connections, connections_udp, uptime
+  )
+  SELECT
+    r.client, r.time, r.cpu, r.gpu, r.ram, r.ram_total, r.swap, r.swap_total, r.load, r.temp,
+    r.disk, r.disk_total, r.net_in, r.net_out, r.net_total_up, r.net_total_down,
+    r.process_count, r.connections, r.connections_udp, r.uptime
+  FROM records r
+  INNER JOIN (
+    SELECT client, MAX(time) AS time
+    FROM records
+    GROUP BY client
+  ) latest
+    ON r.client = latest.client AND r.time = latest.time`,
+  `CREATE TRIGGER IF NOT EXISTS trg_records_latest_insert
+    AFTER INSERT ON records
+    BEGIN
+      DELETE FROM latest_records
+      WHERE client = NEW.client AND time <= NEW.time;
+
+      INSERT OR IGNORE INTO latest_records (
+        client, time, cpu, gpu, ram, ram_total, swap, swap_total, load, temp,
+        disk, disk_total, net_in, net_out, net_total_up, net_total_down,
+        process_count, connections, connections_udp, uptime
+      ) VALUES (
+        NEW.client, NEW.time, NEW.cpu, NEW.gpu, NEW.ram, NEW.ram_total, NEW.swap, NEW.swap_total, NEW.load, NEW.temp,
+        NEW.disk, NEW.disk_total, NEW.net_in, NEW.net_out, NEW.net_total_up, NEW.net_total_down,
+        NEW.process_count, NEW.connections, NEW.connections_udp, NEW.uptime
+      );
+    END`,
+  `CREATE TRIGGER IF NOT EXISTS trg_records_latest_delete
+    AFTER DELETE ON records
+    BEGIN
+      DELETE FROM latest_records
+      WHERE client = OLD.client AND time = OLD.time;
+
+      INSERT OR IGNORE INTO latest_records (
+        client, time, cpu, gpu, ram, ram_total, swap, swap_total, load, temp,
+        disk, disk_total, net_in, net_out, net_total_up, net_total_down,
+        process_count, connections, connections_udp, uptime
+      )
+      SELECT
+        r.client, r.time, r.cpu, r.gpu, r.ram, r.ram_total, r.swap, r.swap_total, r.load, r.temp,
+        r.disk, r.disk_total, r.net_in, r.net_out, r.net_total_up, r.net_total_down,
+        r.process_count, r.connections, r.connections_udp, r.uptime
+      FROM records r
+      WHERE r.client = OLD.client
+      ORDER BY r.time DESC
+      LIMIT 1;
+    END`,
   `CREATE TABLE IF NOT EXISTS gpu_records (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     client TEXT NOT NULL,
@@ -341,6 +417,20 @@ const SCHEMA_STATEMENTS = [
     ON token_blacklist(expires_at)`,
   `CREATE INDEX IF NOT EXISTS idx_token_blacklist_user
     ON token_blacklist(user_id, revoked_at)`,
+  `CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    token_hash TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    email TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id) REFERENCES users(uuid) ON DELETE CASCADE
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_expires
+    ON password_reset_tokens(expires_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user
+    ON password_reset_tokens(user_id, used, expires_at)`,
   `CREATE TABLE IF NOT EXISTS ip_change_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     client_id TEXT NOT NULL,
@@ -450,11 +540,13 @@ const COLUMN_MIGRATIONS = [
 const REQUIRED_BOOTSTRAP_TABLES = [
   'expiry_notifications',
   'history_row_counters',
+  'latest_records',
   'notification_deliveries',
   'notification_incidents',
   'notification_queue',
   'cron_health',
   'token_blacklist',
+  'password_reset_tokens',
   'ip_change_history',
   'load_check_states',
 ] as const;
@@ -467,6 +559,7 @@ const REQUIRED_BOOTSTRAP_COLUMNS: Record<string, readonly string[]> = {
   load_notifications: ['last_attempt_at', 'last_sent_at', 'last_error'],
   notification_deliveries: ['notification_type', 'channel', 'status', 'target', 'client', 'rule_id', 'attempted_at', 'sent_at', 'error', 'created_at'],
   notification_incidents: ['incident_key', 'notification_type', 'target', 'client', 'rule_id', 'status', 'first_detected_at', 'last_detected_at', 'resolved_at', 'last_attempt_at', 'last_sent_at', 'last_error', 'created_at', 'updated_at'],
+  password_reset_tokens: ['token_hash', 'user_id', 'email', 'expires_at', 'used', 'created_at', 'updated_at'],
 };
 
 const REQUIRED_BOOTSTRAP_TRIGGERS = [
@@ -476,6 +569,8 @@ const REQUIRED_BOOTSTRAP_TRIGGERS = [
   'trg_ping_records_insert',
   'trg_ping_snapshots_insert',
   'trg_records_delete',
+  'trg_records_latest_insert',
+  'trg_records_latest_delete',
   'trg_gpu_records_delete',
   'trg_gpu_snapshots_delete',
   'trg_ping_records_delete',
@@ -497,6 +592,12 @@ function isDuplicateColumnError(error: unknown): boolean {
 
 async function runStatement(db: D1Database, statement: string): Promise<void> {
   await db.prepare(statement).run();
+}
+
+async function runBootstrapBatches(db: D1Database, statements: D1PreparedStatement[]): Promise<void> {
+  for (let index = 0; index < statements.length; index += BOOTSTRAP_BATCH_SAFE_STATEMENT_LIMIT) {
+    await db.batch(statements.slice(index, index + BOOTSTRAP_BATCH_SAFE_STATEMENT_LIMIT));
+  }
 }
 
 async function schemaHasRequiredBootstrapObjects(db: D1Database): Promise<boolean> {
@@ -598,7 +699,7 @@ async function migrateStoredClientTokens(db: D1Database): Promise<void> {
   }
 
   if (updates.length > 0) {
-    await db.batch(updates);
+    await runBootstrapBatches(db, updates);
   }
 }
 

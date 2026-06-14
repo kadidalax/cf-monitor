@@ -3,13 +3,14 @@ main = "worker/src/index.ts"
 compatibility_date = "2025-04-01"
 
 [triggers]
-# Runs every minute for low-latency offline checks; heavy cleanup/expiry jobs are gated in worker/src/index.ts.
 crons = ["* * * * *"]
 
 [[d1_databases]]
 binding = "DB"
 database_name = "cf-monitor-db"
 database_id = "6571d29a-848b-4561-b475-2d56d196f9c5"
+migrations_dir = "worker/migrations"
+migrations_pattern = "worker/migrations/{001_init,003_query_indexes,004_remove_removed_settings,005_login_rate_limits,006_ping_task_sort_order,007_client_sort_order,008_record_high_watermark,009_expiry_notifications,010_optimize_ping_indexes,011_align_runtime_interval_settings,012_ping_snapshots,013_gpu_snapshots,014_drop_redundant_client_indexes,015_ping_persist_interval,016_history_row_counters,017_last_seen_sessions_notifications,018_client_token_hash,019_notification_deliveries,020_public_privacy_mode,021_notification_incidents,022_token_hash_index,023_client_report_interval,024_latest_records,025_password_reset_tokens}.sql"
 
 [[durable_objects.bindings]]
 name = "LIVE_DATA"

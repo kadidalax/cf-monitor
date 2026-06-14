@@ -1,10 +1,3 @@
-/**
- * 数据库查询测试示例
- *
- * 注意：这些测试需要 Miniflare 环境
- * 实际运行需要配置 Miniflare 和测试数据库
- */
-
 import { describe, it, expect } from 'vitest';
 import { buildPublicSettings, normalizeSettingValue } from '../settings/schema';
 import {
@@ -14,20 +7,6 @@ import {
   shouldRunScheduledInterval,
 } from '../index';
 import { normalizeAuditLogLevel } from '../db/queries';
-
-describe('database queries (placeholder)', () => {
-  // 这里需要 Miniflare 环境设置
-  // 实际实现需要：
-  // 1. 配置 Miniflare
-  // 2. 创建测试数据库
-  // 3. 运行迁移
-  // 4. 测试查询
-
-  it('should be implemented with Miniflare', () => {
-    // TODO: 实现数据库测试
-    expect(true).toBe(true);
-  });
-});
 
 describe('settings schema', () => {
   it('exposes public privacy mode with a safe default', () => {
@@ -132,40 +111,3 @@ describe('audit log helpers', () => {
     expect(normalizeAuditLogLevel('debug')).toBe('info');
   });
 });
-
-// 示例：如何测试数据库查询
-/*
-import { env, createExecutionContext } from 'cloudflare:test';
-import { describe, it, expect, beforeEach } from 'vitest';
-
-describe('Client queries', () => {
-  let db: D1Database;
-
-  beforeEach(async () => {
-    db = env.DB;
-    // 运行迁移或创建测试数据
-  });
-
-  it('should get client by uuid', async () => {
-    const client = await getClient(db, 'test-uuid');
-    expect(client).toBeDefined();
-    expect(client?.uuid).toBe('test-uuid');
-  });
-
-  it('should return null for non-existent client', async () => {
-    const client = await getClient(db, 'non-existent');
-    expect(client).toBeNull();
-  });
-
-  it('should list all clients sorted by sort_order', async () => {
-    const clients = await listClients(db);
-    expect(Array.isArray(clients)).toBe(true);
-
-    for (let i = 1; i < clients.length; i++) {
-      const prev = clients[i - 1].sort_order || 0;
-      const curr = clients[i].sort_order || 0;
-      expect(prev).toBeLessThanOrEqual(curr);
-    }
-  });
-});
-*/

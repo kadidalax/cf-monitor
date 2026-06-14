@@ -732,7 +732,7 @@ async function getCapacityRowCounts(
   return value;
 }
 
-async function buildCapacityEstimate(database: D1Database, options: { forceCounts?: boolean; scanCounts?: boolean } = {}) {
+export async function buildCapacityEstimate(database: D1Database, options: { forceCounts?: boolean; scanCounts?: boolean } = {}) {
   const nowMs = Date.now();
   if (!options.forceCounts && capacityEstimateCache && capacityEstimateCache.expiresAt > nowMs) {
     return {
@@ -1107,7 +1107,7 @@ adminRoutes.post('/clients/:uuid/remove', async (c) => {
     await db.deleteClient(c.env.DB, uuid);
     await removeLiveClient(c, uuid);
     // 同时清除相关记录
-    await db.clearClientRecords(c.env.DB, uuid);
+    const deletedRecords = await db.clearClientRecords(c.env.DB, uuid);
     const cleanup = await db.pruneClientReferences(c.env.DB, uuid);
     invalidatePublicMetadataCache();
     invalidateAgentClientAuthCache({ uuid });
@@ -1115,8 +1115,8 @@ adminRoutes.post('/clients/:uuid/remove', async (c) => {
     invalidateAllowedClientIdsCache();
     invalidateCapacityEstimateCache();
     await refreshLivePingTasks(c);
-    await db.insertAuditLog(c.env.DB, c.get('username')!, 'client_remove', `删除客户端: ${uuid}; 清理引用: ${JSON.stringify(cleanup)}`);
-    return c.json({ success: true });
+    await db.insertAuditLog(c.env.DB, c.get('username')!, 'client_remove', `删除客户端: ${uuid}; 删除历史: ${JSON.stringify(deletedRecords)}; 清理引用: ${JSON.stringify(cleanup)}`);
+    return c.json({ success: true, deleted_records: deletedRecords, cleanup });
   } catch {
     return c.json({ error: '删除失败' }, 500);
   }
@@ -1262,12 +1262,13 @@ adminRoutes.post('/record/clear', async (c) => {
     if (reauthError) return reauthError;
 
     const uuid = body.uuid;
+    let deletedRecords = null;
     if (uuid) {
-      await db.clearClientRecords(c.env.DB, uuid);
+      deletedRecords = await db.clearClientRecords(c.env.DB, uuid);
       invalidateCapacityEstimateCache();
     }
-    await db.insertAuditLog(c.env.DB, c.get('username')!, 'record_clear', `清除记录: ${uuid}`);
-    return c.json({ success: true });
+    await db.insertAuditLog(c.env.DB, c.get('username')!, 'record_clear', `清除记录: ${uuid}; deleted=${JSON.stringify(deletedRecords)}`);
+    return c.json({ success: true, deleted: deletedRecords });
   } catch {
     return c.json({ error: '清除失败' }, 500);
   }
@@ -2274,7 +2275,7 @@ adminRoutes.post('/auth/revoke-all', async (c) => {
     const userId = c.get('userId');
     const username = c.get('username');
 
-    await refreshToken.revokeAllUserTokens(c.env.DB, userId);
+    await refreshToken.revokeAllUserTokens(c.env.DB, userId, 'user_initiated');
 
     await db.insertAuditLog(
       c.env.DB,
@@ -2386,11 +2387,10 @@ adminRoutes.get('/health', async (c) => {
     const pendingCount = Number(queueStats.results?.find((r: any) => r.status === 'pending')?.count || 0);
 
     // Token黑名单大小
-    const nowIso = new Date().toISOString();
     const blacklistSize = await c.env.DB.prepare(`
       SELECT COUNT(*) as count FROM token_blacklist
-      WHERE expires_at > ?
-    `).bind(nowIso).first<{ count: number }>();
+      WHERE expires_at > datetime('now')
+    `).first<{ count: number }>();
 
     const responseTime = Date.now() - startTime;
 

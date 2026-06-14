@@ -943,8 +943,8 @@ export class LiveDataDO {
   private async handleMessage(clientId: string, clientName: string, hidden: boolean, data: any, ws: WebSocket) {
     const now = Date.now();
     if (data?.type === 'ping_result') {
-      this.runBackground(this.markClientSeen(clientId, now, 'ws-ping'));
-      this.runBackground(this.persistPingResult(clientId, data, now));
+      this.runInBackground('markClientSeen:ws-ping', this.markClientSeen(clientId, now, 'ws-ping'));
+      this.runInBackground('persistPingResult', this.persistPingResult(clientId, data, now));
       return;
     }
 
@@ -964,7 +964,7 @@ export class LiveDataDO {
           reportsToPersist.push({ report: rawReport, reportTime });
         }
       }
-      this.runBackground(this.markClientSeen(clientId, now, 'ws', false, false, lastReportIntervalSec));
+      this.runInBackground('markClientSeen:ws', this.markClientSeen(clientId, now, 'ws', false, false, lastReportIntervalSec));
 
       if (ws.readyState === WebSocket.READY_STATE_OPEN) {
         try {
@@ -973,12 +973,12 @@ export class LiveDataDO {
           // 忽略 ack 发送错误
         }
       }
-      this.runBackground(this.persistReportsSequential(clientId, reportsToPersist));
+      this.runInBackground('persistReportsSequential', this.persistReportsSequential(clientId, reportsToPersist));
       return;
     }
 
     const report = this.updateClientReport(clientId, clientName, hidden, data, now);
-    this.runBackground(this.markClientSeen(clientId, now, 'ws', false, false, report.report_interval));
+    this.runInBackground('markClientSeen:ws', this.markClientSeen(clientId, now, 'ws', false, false, report.report_interval));
 
     if (ws.readyState === WebSocket.READY_STATE_OPEN) {
       try {
@@ -989,7 +989,7 @@ export class LiveDataDO {
     }
 
     // 持久化放在实时响应之后，避免 D1 写入延迟阻塞 Agent WebSocket ack。
-    this.runBackground(this.persistReport(clientId, report, now));
+    this.runInBackground('persistReport', this.persistReport(clientId, report, now));
   }
 
   async webSocketMessage(ws: WebSocket, message: ArrayBuffer | string): Promise<void> {
@@ -1048,14 +1048,26 @@ export class LiveDataDO {
     if (now - lastPersist < this.recordPersistIntervalMs) {
       return false;
     }
-    this.recordLastPersistAt.set(clientId, now);
-    try {
-      await this.state.storage.put(storageKey, now);
-    } catch (error) {
-      this.recordLastPersistAt.set(clientId, lastPersist);
-      throw error;
-    }
     return true;
+  }
+
+  private runInBackground(label: string, task: Promise<unknown>): void {
+    this.state.waitUntil(task.catch(async (error) => {
+      if (!this.env?.DB) return;
+      await bestEffortRecordHealthEvent(
+        this.env.DB,
+        'do_background_task',
+        'error',
+        `${label} failed: ${errorDetail(error)}`,
+        { auditAction: 'do_background_task_error' },
+      );
+    }));
+  }
+
+  private async markPersistedAt(clientId: string, now: number): Promise<void> {
+    const storageKey = `record:persist:${clientId}`;
+    this.recordLastPersistAt.set(clientId, now);
+    await this.state.storage.put(storageKey, now);
   }
 
   private async persistReportsSequential(
@@ -1146,15 +1158,16 @@ export class LiveDataDO {
         );
       }
     } catch (error) {
-      this.recordCapacityNextCheckAt = now + RECORD_CAPACITY_CACHE_NEAR_MS;
+      this.recordCapacityBlocked = true;
+      this.recordCapacityNextCheckAt = now + RECORD_CAPACITY_CACHE_CRITICAL_MS;
       await bestEffortRecordHealthEvent(
         this.env.DB,
         'do_record_persistence',
         'error',
-        `record capacity check failed: ${errorDetail(error)}`,
+        `record capacity check failed and history writes are temporarily paused: ${errorDetail(error)}`,
         { auditAction: 'do_record_capacity_error' },
       );
-      return true;
+      return false;
     }
 
     return !this.recordCapacityBlocked;
@@ -1194,6 +1207,15 @@ export class LiveDataDO {
       return false;
     }
 
+    if (!(await this.isRecordPersistenceEnabled(nowMs))) {
+      return false;
+    }
+
+    if (!(await this.canPersistWithinCapacity(nowMs))) {
+      return false;
+    }
+
+    const time = new Date(nowMs).toISOString();
     try {
       if (!(await this.isRecordPersistenceEnabled(nowMs))) {
         return false;
@@ -1233,6 +1255,20 @@ export class LiveDataDO {
         record.connections_udp,
         record.uptime,
       ).run();
+
+      if (!force) {
+        try {
+          await this.markPersistedAt(clientId, nowMs);
+        } catch (error) {
+          await bestEffortRecordHealthEvent(
+            this.env.DB,
+            'do_record_persistence',
+            'error',
+            `record persist marker failed for ${clientId}: ${errorDetail(error)}`,
+            { auditAction: 'do_record_persist_marker_error' },
+          );
+        }
+      }
 
       if (Array.isArray(report.gpus) && report.gpus.length > 0) {
         await db.insertGPURecords(this.env.DB, clientId, time, report.gpus);

@@ -9,7 +9,7 @@
     "test": "vitest run",
     "build:frontend": "npm --prefix ../frontend run build",
     "predeploy": "npm run build:frontend && npm run build",
-    "deploy": "wrangler deploy",
+    "deploy": "npm run db:migrate:remote && wrangler deploy",
     "db:create": "wrangler d1 create cf-monitor-db",
     "db:migrate:local": "node ./scripts/run-migrations.mjs local",
     "db:migrate:remote": "node ./scripts/run-migrations.mjs remote",

@@ -11,12 +11,12 @@
     "build": "npm --prefix frontend run build && npm --prefix worker run build",
     "test": "npm --prefix frontend run test && npm --prefix worker run test",
     "verify": "npm run build",
-    "deploy": "npm run build && node ./worker/node_modules/wrangler/bin/wrangler.js deploy --config wrangler.toml",
+    "deploy": "npm run build && npm run db:migrate:remote && node ./worker/node_modules/wrangler/bin/wrangler.js deploy --config wrangler.toml",
     "dev:worker": "npm --prefix worker run dev",
     "dev:frontend": "npm --prefix frontend run dev",
     "db:create": "npm --prefix worker run db:create",
-    "db:migrate:local": "npm --prefix worker run db:migrate:local",
-    "db:migrate:remote": "npm --prefix worker run db:migrate:remote",
+    "db:migrate:local": "npm --prefix worker run db:migrate:local -- cf-monitor-db ..",
+    "db:migrate:remote": "npm --prefix worker run db:migrate:remote -- cf-monitor-db ..",
     "db:reset:local": "npm --prefix worker run db:reset:local"
   }
 }

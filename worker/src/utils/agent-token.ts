@@ -26,6 +26,10 @@ export function readStoredTokenHash(value: unknown): string | null {
   return match ? match[1] : null;
 }
 
+export function isStoredTokenHash(value: unknown): boolean {
+  return readStoredTokenHash(value) !== null;
+}
+
 export async function hashAgentToken(token: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
   return bytesToHex(new Uint8Array(digest));

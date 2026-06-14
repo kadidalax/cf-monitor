@@ -11,7 +11,7 @@ import { normalizeMonitorReport } from '../utils/monitor-report';
 import { validatePingResults } from '../utils/ping-result';
 import { escapeTelegramHtml } from '../utils/telegram';
 import { bestEffortRecordHealthEvent, errorDetail } from '../utils/observability';
-import { LRUCache, LRUCacheWithStats } from '../utils/lru-cache';
+import { LRUCacheWithStats } from '../utils/lru-cache';
 
 const clientRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 const HTTP_LIVE_TTL_FALLBACK_MS = 180_000;
@@ -44,24 +44,17 @@ const AGENT_POLICY_SETTING_KEYS = [
 const AGENT_PING_INTERVAL_SETTING_KEYS = ['ping_record_persist_interval_sec'];
 
 // 使用LRU缓存替代普通Map
-const agentAuthCache = new LRUCacheWithStats<string, db.Client>(AGENT_AUTH_CACHE_MAX_ENTRIES);
-const agentIdentityAuthCache = new LRUCacheWithStats<string, db.ClientIdentity>(AGENT_AUTH_CACHE_MAX_ENTRIES);
-const httpLastSeenWriteAt = new LRUCache<string, number>(HTTP_LAST_SEEN_CACHE_MAX_ENTRIES);
+type AgentAuthCacheEntry<T> =
+  | { status: 'hit'; client: T }
+  | { status: 'miss' };
+
+const agentAuthCache = new LRUCacheWithStats<string, AgentAuthCacheEntry<db.Client>>(AGENT_AUTH_CACHE_MAX_ENTRIES);
+const agentIdentityAuthCache = new LRUCacheWithStats<string, AgentAuthCacheEntry<db.ClientIdentity>>(AGENT_AUTH_CACHE_MAX_ENTRIES);
 let agentPingTasksCache: { value: db.PingTask[]; expiresAt: number } | null = null;
 let agentPingIntervalCache: { value: number; expiresAt: number } | null = null;
 
-function reserveHttpLastSeenWrite(clientId: string, nowMs: number, persisted: boolean): boolean {
-  if (persisted) {
-    httpLastSeenWriteAt.set(clientId, nowMs, HTTP_LAST_SEEN_UPDATE_INTERVAL_MS, nowMs);
-    return true;
-  }
-
-  const lastWriteAt = httpLastSeenWriteAt.get(clientId, nowMs);
-  if (lastWriteAt !== null && nowMs - lastWriteAt < HTTP_LAST_SEEN_UPDATE_INTERVAL_MS) {
-    return false;
-  }
-  httpLastSeenWriteAt.set(clientId, nowMs, HTTP_LAST_SEEN_UPDATE_INTERVAL_MS, nowMs);
-  return true;
+function isValidAuthenticatedClient(client: { uuid?: unknown } | null | undefined): client is { uuid: string } {
+  return typeof client?.uuid === 'string' && client.uuid.trim() !== '';
 }
 
 export function invalidateAgentClientAuthCache(client?: { uuid?: string; token?: string }): void {
@@ -73,13 +66,13 @@ export function invalidateAgentClientAuthCache(client?: { uuid?: string; token?:
 
   // 清除特定token或uuid的缓存
   const now = Date.now();
-  for (const [token, cachedClient] of agentAuthCache.entries(now)) {
-    if (token === client.token || cachedClient.uuid === client.uuid) {
+  for (const [token, cachedEntry] of agentAuthCache.entries(now)) {
+    if (token === client.token || (cachedEntry.status === 'hit' && cachedEntry.client.uuid === client.uuid)) {
       agentAuthCache.delete(token);
     }
   }
-  for (const [token, cachedIdentity] of agentIdentityAuthCache.entries(now)) {
-    if (token === client.token || cachedIdentity.uuid === client.uuid) {
+  for (const [token, cachedEntry] of agentIdentityAuthCache.entries(now)) {
+    if (token === client.token || (cachedEntry.status === 'hit' && cachedEntry.client.uuid === client.uuid)) {
       agentIdentityAuthCache.delete(token);
     }
   }
@@ -90,38 +83,48 @@ export function invalidateAgentPingTaskCache(): void {
   agentPingIntervalCache = null;
 }
 
-async function getAgentClientByToken(database: D1Database, token: string): Promise<db.Client | null> {
+/**
+ * 获取认证缓存统计信息（用于监控）
+ */
+export function getAgentAuthCacheStats() {
+  return {
+    client_cache: agentAuthCache.getStats(),
+    identity_cache: agentIdentityAuthCache.getStats(),
+  };
+}
+
+export async function getAgentClientByToken(database: D1Database, token: string): Promise<db.Client | null> {
   const now = Date.now();
   const cached = agentAuthCache.get(token, now);
   if (cached !== null) {
-    return cached;
+    return cached.status === 'hit' ? cached.client : null;
   }
 
   const client = await db.getClientByToken(database, token);
-  if (client) {
-    agentAuthCache.set(token, client, AGENT_AUTH_CACHE_MS, now);
+  if (isValidAuthenticatedClient(client)) {
+    agentAuthCache.set(token, { status: 'hit', client }, AGENT_AUTH_CACHE_MS, now);
   } else {
     // 负缓存：记录认证失败，避免重复查询
-    agentAuthCache.set(token, { uuid: '', name: '', hidden: false } as any, AGENT_AUTH_NEGATIVE_CACHE_MS, now);
+    agentAuthCache.set(token, { status: 'miss' }, AGENT_AUTH_NEGATIVE_CACHE_MS, now);
   }
-  return client;
+  return isValidAuthenticatedClient(client) ? client : null;
 }
 
 export async function getAgentClientIdentityByToken(database: D1Database, token: string): Promise<db.ClientIdentity | null> {
   const now = Date.now();
   const cached = agentIdentityAuthCache.get(token, now);
   if (cached !== null) {
-    return cached;
+    return cached.status === 'hit' ? cached.client : null;
   }
 
   const client = await db.getClientIdentityByToken(database, token);
-  if (client) {
-    agentIdentityAuthCache.set(token, client, AGENT_AUTH_CACHE_MS, now);
+  if (isValidAuthenticatedClient(client)) {
+    agentIdentityAuthCache.set(token, { status: 'hit', client }, AGENT_AUTH_CACHE_MS, now);
   } else {
     // 负缓存
-    agentIdentityAuthCache.set(token, { uuid: '', name: '', hidden: false } as any, AGENT_AUTH_NEGATIVE_CACHE_MS, now);
+    agentIdentityAuthCache.set(token, { status: 'miss' }, AGENT_AUTH_NEGATIVE_CACHE_MS, now);
   }
-  return client;
+  return isValidAuthenticatedClient(client) ? client : null;
 }
 
 async function listAgentPingTasks(database: D1Database): Promise<db.PingTask[]> {
@@ -442,7 +445,7 @@ async function clientAuth(c: any, next: any) {
   if (limited) return limited;
 
   const client = await getAgentClientByToken(c.env.DB, token);
-  if (!client) {
+  if (!isValidAuthenticatedClient(client)) {
     return c.json({ error: '无效的 Token' }, 401);
   }
 
@@ -464,7 +467,7 @@ async function clientIdentityAuth(c: any, next: any) {
   if (limited) return limited;
 
   const client = await getAgentClientIdentityByToken(c.env.DB, token);
-  if (!client) {
+  if (!isValidAuthenticatedClient(client)) {
     return c.json({ error: '无效的 Token' }, 401);
   }
 
@@ -577,15 +580,7 @@ clientRoutes.post('/report', clientAuth, async (c) => {
 
     const persisted = await updateLiveReport(c, uuid, liveName, hidden, reports.length > 1 ? reports : report, nowMs);
     const seenAt = new Date(nowMs).toISOString();
-    const shouldWriteLastSeen = reserveHttpLastSeenWrite(uuid, nowMs, persisted);
-    if (shouldWriteLastSeen) {
-      try {
-        await db.markClientSeen(c.env.DB, uuid, seenAt, 'http', persisted ? seenAt : null, report.report_interval);
-      } catch (error) {
-        httpLastSeenWriteAt.delete(uuid);
-        throw error;
-      }
-    }
+    await db.markClientSeen(c.env.DB, uuid, seenAt, 'http', persisted ? seenAt : null, report.report_interval);
     if (persisted) {
       // 版本信息不需要每次上报写入 D1，跟随历史采样刷新即可。
       if (report.version && clientFieldChanged(authClient?.version, report.version)) {

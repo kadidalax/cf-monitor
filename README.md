@@ -4,9 +4,9 @@ Cloudflare Worker probe monitoring panel built with Worker + D1 + Durable Object
 
 It provides a public status dashboard, an admin panel, server agent reporting APIs, historical metrics, GPU history, ping monitoring, notification rules, audit logs, backup export, and local/remote migration scripts.
 
-## One-Click Deploy To Cloudflare
+## Cloudflare Deploy Wizard
 
-For beginners, use the button below. It opens Cloudflare's deploy wizard. In most cases you can keep clicking **Next / Continue / Deploy**.
+The button below opens Cloudflare's deploy wizard. D1 databases are account-scoped, so a new deployment still needs a D1 database ID from your own Cloudflare account. If the wizard does not ask you to create or select a D1 database, use the manual deployment steps below first, then deploy.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/kadidalax/cf-monitor)
 
@@ -40,16 +40,16 @@ Log in with the `ADMIN_USERNAME` and `ADMIN_PASSWORD` you entered in the Cloudfl
 
 ## What Cloudflare Creates
 
-The deploy button reads the root `wrangler.toml` and provisions:
+The deploy wizard reads the root `wrangler.toml` and uses:
 
 - Cloudflare Worker
-- D1 database binding: `DB`
+- D1 database binding: `DB` with your own `database_id`
 - Durable Object: `LIVE_DATA`
 - Durable Object: `RATE_LIMIT`
 - Static assets from `frontend/dist`
-- Cron trigger every 10 minutes
+- Cron trigger every minute; heavier cleanup and notification work is throttled in code
 
-The root deploy script builds the frontend, runs Worker type checks, and deploys the Worker. On first request, the Worker initializes the D1 schema automatically so the deploy button can complete without a pre-existing D1 `database_id`.
+The root deploy script builds the frontend, applies remote D1 migrations, and deploys the Worker. Runtime schema bootstrap remains as an empty-database fallback, but migrations are the primary schema path.
 
 ## Manual Deploy
 
@@ -85,6 +85,8 @@ Deploy:
 cd ..
 npm run deploy
 ```
+
+`npm run deploy` runs the remote D1 migration runner before `wrangler deploy`.
 
 ## Local Development
 
@@ -162,7 +164,7 @@ worker/     Cloudflare Worker API, D1 migrations, Durable Objects
 
 ```bash
 npm run build               # frontend build + Worker type check
-npm run deploy              # build + remote D1 migrations + Worker deploy
+npm run deploy              # build + tracked remote D1 migrations + Worker deploy
 npm run verify              # build-only verification
 npm run db:migrate:remote   # remote D1 migrations only
 npm run db:migrate:local    # local D1 migrations only

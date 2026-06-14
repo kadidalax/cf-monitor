@@ -134,7 +134,7 @@ export async function deleteOldQueueItems(
  */
 export function calculateNextRetryTime(attemptCount: number, baseDelayMs = 60000): string {
   // 指数退避：1分钟, 2分钟, 5分钟, 10分钟, 20分钟
-  const delays = [baseDelayMs, baseDelayMs * 2, baseDelayMs * 5, baseDelayMs * 10, baseDelayMs * 20];
+  const delays = [60000, 120000, 300000, 600000, 1200000];
   const delayMs = delays[Math.min(attemptCount, delays.length - 1)];
   return new Date(Date.now() + delayMs).toISOString();
 }

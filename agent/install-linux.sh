@@ -17,7 +17,6 @@ BINARY=""
 BINARY_URL=""
 BINARY_SHA256=""
 CHECKSUM_URL=""
-SOURCE_SHA256=""
 SKIP_CHECKSUM="0"
 AUTO_BINARY_URL="0"
 BINARY_CHECKSUM_REQUIRED="0"
@@ -36,6 +35,8 @@ MOUNT_INCLUDE=""
 MOUNT_EXCLUDE=""
 NIC_INCLUDE=""
 NIC_EXCLUDE=""
+ALLOW_LOCAL_PING_TARGETS="0"
+BLOCK_PRIVATE_PING_TARGETS="0"
 DISABLE_WEB_SSH="0"
 DISABLE_AUTO_UPDATE="0"
 IGNORE_UNSAFE_CERT="0"
@@ -73,6 +74,10 @@ Options:
   --mount-exclude LIST      Comma-separated mountpoint/device patterns excluded from disk totals.
   --nic-include LIST        Comma-separated network interface patterns included in traffic totals.
   --nic-exclude LIST        Comma-separated network interface patterns excluded from traffic totals.
+  --allow-local-ping-targets
+                            Allow loopback, link-local, and metadata-service ping targets.
+  --block-private-ping-targets
+                            Block RFC1918 and IPv6 ULA ping targets in addition to local targets.
   --disable-web-ssh         Accepted for Komari option compatibility.
   --disable-auto-update     Accepted for Komari option compatibility.
   --ignore-unsafe-cert      Accepted for Komari option compatibility.
@@ -259,47 +264,6 @@ verify_binary_sha256() {
   echo "Verified SHA256 for ${expected_name}."
 }
 
-verify_source_sha256() {
-  local file="$1"
-  local source_url="$2"
-  local expected="${SOURCE_SHA256}"
-  local expected_name
-  expected_name="$(url_basename "$source_url")"
-
-  if [[ "$SKIP_CHECKSUM" == "1" ]]; then
-    echo "Warning: source archive SHA256 verification skipped." >&2
-    return 0
-  fi
-
-  if [[ "$DRY_RUN" == "1" ]]; then
-    echo "[dry-run] verify source SHA256 for ${expected_name}" >&2
-    return 0
-  fi
-
-  if [[ -z "$expected" ]]; then
-    echo "Missing SHA256 checksum for source archive ${expected_name}. Pass --source-sha256, --binary-url, --binary, or --skip-checksum." >&2
-    exit 1
-  fi
-
-  if ! is_sha256_hex "$expected"; then
-    echo "Invalid source SHA256 checksum: $expected" >&2
-    exit 1
-  fi
-
-  local actual expected_lower actual_lower
-  actual="$(sha256_file "$file")"
-  expected_lower="$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')"
-  actual_lower="$(printf '%s' "$actual" | tr '[:upper:]' '[:lower:]')"
-  if [[ "$actual_lower" != "$expected_lower" ]]; then
-    echo "SHA256 mismatch for source archive ${expected_name}." >&2
-    echo "Expected: ${expected_lower}" >&2
-    echo "Actual:   ${actual_lower}" >&2
-    exit 1
-  fi
-
-  echo "Verified SHA256 for source archive ${expected_name}." >&2
-}
-
 resolve_build_dir() {
   if [[ -f "$SCRIPT_DIR/main.go" ]]; then
     printf '%s' "$SCRIPT_DIR"
@@ -453,7 +417,6 @@ while [[ $# -gt 0 ]]; do
     --binary-url) BINARY_URL="${2:-}"; shift 2 ;;
     --binary-sha256) BINARY_SHA256="${2:-}"; shift 2 ;;
     --checksum-url) CHECKSUM_URL="${2:-}"; shift 2 ;;
-    --source-sha256) SOURCE_SHA256="${2:-}"; shift 2 ;;
     --skip-checksum) SKIP_CHECKSUM="1"; shift ;;
     --release-tag) CF_MONITOR_RELEASE_TAG="${2:-}"; shift 2 ;;
     --proxy) PROXY="${2:-}"; shift 2 ;;
@@ -461,6 +424,8 @@ while [[ $# -gt 0 ]]; do
     --mount-exclude) MOUNT_EXCLUDE="${2:-}"; shift 2 ;;
     --nic-include) NIC_INCLUDE="${2:-}"; shift 2 ;;
     --nic-exclude) NIC_EXCLUDE="${2:-}"; shift 2 ;;
+    --allow-local-ping-targets) ALLOW_LOCAL_PING_TARGETS="1"; shift ;;
+    --block-private-ping-targets) BLOCK_PRIVATE_PING_TARGETS="1"; shift ;;
     --disable-web-ssh) DISABLE_WEB_SSH="1"; shift ;;
     --disable-auto-update) DISABLE_AUTO_UPDATE="1"; shift ;;
     --ignore-unsafe-cert) IGNORE_UNSAFE_CERT="1"; shift ;;
@@ -631,6 +596,8 @@ CF_MONITOR_MOUNT_INCLUDE=${MOUNT_INCLUDE}
 CF_MONITOR_MOUNT_EXCLUDE=${MOUNT_EXCLUDE}
 CF_MONITOR_NIC_INCLUDE=${NIC_INCLUDE}
 CF_MONITOR_NIC_EXCLUDE=${NIC_EXCLUDE}
+CF_MONITOR_ALLOW_LOCAL_PING_TARGETS=${ALLOW_LOCAL_PING_TARGETS}
+CF_MONITOR_BLOCK_PRIVATE_PING_TARGETS=${BLOCK_PRIVATE_PING_TARGETS}
 EOF
 )
 write_file "$ENV_FILE" "600" "$ENV_CONTENT"

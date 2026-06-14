@@ -260,7 +260,7 @@ function normalizeSafeImageUrl(value: string): string | null {
   }
 }
 
-function isKnownSettingKey(key: string): key is SettingKey {
+export function isKnownSettingKey(key: string): key is SettingKey {
   return SETTING_KEY_SET.has(key);
 }
 

@@ -5,11 +5,12 @@ import { spawn } from 'node:child_process';
 
 const workerRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const mode = process.argv[2] === 'remote' ? 'remote' : 'local';
-const d1Name = process.argv[3] || (mode === 'remote' ? 'DB' : 'cf-monitor-db');
+const d1Name = process.argv[3] || 'cf-monitor-db';
 const configRoot = process.argv[4] ? path.resolve(process.cwd(), process.argv[4]) : workerRoot;
 const migrationsDir = path.join(workerRoot, 'migrations');
 const wranglerBin = path.join(workerRoot, 'node_modules', 'wrangler', 'bin', 'wrangler.js');
 const configPath = path.join(configRoot, 'wrangler.toml');
+const migrationsTableName = 'd1_migrations';
 
 const migrations = [
   '001_init.sql',
@@ -34,6 +35,8 @@ const migrations = [
   '021_notification_incidents.sql',
   '022_token_hash_index.sql',
   '023_client_report_interval.sql',
+  '024_latest_records.sql',
+  '025_password_reset_tokens.sql',
 ];
 const intentionallyManualMigrations = new Set([
   '000_reset_local.sql',
@@ -136,6 +139,16 @@ async function executeSql(label, sql) {
   await runWrangler(wranglerArgs([`--command=${sql}`]), { capture: true });
 }
 
+async function querySql(sql) {
+  const result = await runWrangler(wranglerArgs([`--command=${sql}`, '--json']), { capture: true });
+  const parsed = JSON.parse(result.stdout || '[]');
+  return Array.isArray(parsed) ? parsed.flatMap(item => item?.results || []) : [];
+}
+
+function sqlString(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
 function splitStatements(sql) {
   return sql
     .replace(/^\s*--.*$/gm, '')
@@ -173,15 +186,42 @@ const idempotentColumnMigrations = new Set([
   '023_client_report_interval.sql',
 ]);
 
-await validateMigrationList();
-await validateWranglerConfigSync();
+async function ensureMigrationsTable() {
+  await executeSql('ensure d1_migrations table', `CREATE TABLE IF NOT EXISTS ${migrationsTableName}(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE,
+    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+  )`);
+}
+
+async function getAppliedMigrations() {
+  const rows = await querySql(`SELECT name FROM ${migrationsTableName}`);
+  return new Set(
+    rows
+      .map(row => typeof row?.name === 'string' ? row.name : '')
+      .filter(Boolean),
+  );
+}
+
+async function markMigrationApplied(fileName) {
+  await executeSql(`record ${fileName}`, `INSERT OR IGNORE INTO ${migrationsTableName} (name) VALUES (${sqlString(fileName)})`);
+}
+
+await ensureMigrationsTable();
+const appliedMigrations = await getAppliedMigrations();
 
 for (const fileName of migrations) {
+  if (appliedMigrations.has(fileName)) {
+    console.log(`[migrate] ${mode}: ${fileName} already applied, skipping`);
+    continue;
+  }
+
   if (idempotentColumnMigrations.has(fileName)) {
     await executeIdempotentColumnMigration(fileName);
   } else {
     await executeFile(fileName);
   }
+  await markMigrationApplied(fileName);
 }
 
 console.log(`[migrate] ${mode}: complete`);

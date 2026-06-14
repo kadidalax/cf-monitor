@@ -36,7 +36,6 @@ export async function generateToken(userId: string, username: string, env: JwtEn
     userId,
     username,
     sessionVersion,
-    type: 'access',
     iat: now,
     exp: now + 7 * 24 * 60 * 60,
   };

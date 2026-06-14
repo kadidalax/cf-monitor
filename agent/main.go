@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -38,17 +39,20 @@ const defaultPingIntervalSec = 60
 const minReportInterval = 3 * time.Second
 
 var (
-	token             string
-	serverURL         string
-	reportInterval    int
-	clientName        string
-	reportMode        string
-	reconnectInterval int
-	pingInterval      int
-	mountInclude      string
-	mountExclude      string
-	nicInclude        string
-	nicExclude        string
+	token                   string
+	serverURL               string
+	reportInterval          int
+	clientName              string
+	reportMode              string
+	reconnectInterval       int
+	pingInterval            int
+	mountInclude            string
+	mountExclude            string
+	nicInclude              string
+	nicExclude              string
+	allowLocalPingTargets  bool
+	blockPrivatePingTargets bool
+	reportIntervalState     atomic.Int64
 )
 
 type BasicInfo struct {
@@ -223,6 +227,8 @@ func init() {
 	flag.StringVar(&mountExclude, "mount-exclude", "", "Comma-separated mountpoint/device patterns to exclude from disk totals, for example /boot,tmpfs,/run")
 	flag.StringVar(&nicInclude, "nic-include", "", "Comma-separated network interface patterns to include in traffic totals, for example eth*,ens*")
 	flag.StringVar(&nicExclude, "nic-exclude", "", "Comma-separated network interface patterns to exclude from traffic totals, for example lo,docker*,veth*")
+	flag.BoolVar(&allowLocalPingTargets, "allow-local-ping-targets", false, "Allow ping tasks to loopback, link-local, or metadata-service targets")
+	flag.BoolVar(&blockPrivatePingTargets, "block-private-ping-targets", false, "Block RFC1918 and IPv6 ULA ping targets in addition to local targets")
 }
 
 func main() {
@@ -238,6 +244,7 @@ func main() {
 	if pingInterval < 1 {
 		pingInterval = defaultPingIntervalSec
 	}
+	setReportIntervalSec(reportInterval)
 
 	normalizedServer, err := normalizeServerURL(serverURL)
 	if err != nil {
@@ -252,9 +259,10 @@ func main() {
 
 	log.Printf("CF Monitor Agent v%s", Version)
 	log.Printf("server: %s", serverURL)
-	log.Printf("interval: %ds", reportInterval)
+	log.Printf("interval: %ds", currentReportIntervalSec())
 	log.Printf("mode: %s", reportMode)
 	log.Printf("ping poll: every %ds", pingInterval)
+	logPingTargetPolicy()
 	logFilter("disk include", mountInclude)
 	logFilter("disk exclude", mountExclude)
 	logFilter("network include", nicInclude)
@@ -301,6 +309,50 @@ func applyEnvDefaults() {
 	}
 	if nicExclude == "" {
 		nicExclude = os.Getenv("CF_MONITOR_NIC_EXCLUDE")
+	}
+	if !allowLocalPingTargets {
+		allowLocalPingTargets = envBool("CF_MONITOR_ALLOW_LOCAL_PING_TARGETS")
+	}
+	if !blockPrivatePingTargets {
+		blockPrivatePingTargets = envBool("CF_MONITOR_BLOCK_PRIVATE_PING_TARGETS")
+	}
+}
+
+func envBool(name string) bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
+	switch value {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func currentReportIntervalSec() int {
+	intervalSec := int(reportIntervalState.Load())
+	if intervalSec < int(minReportInterval/time.Second) {
+		return int(minReportInterval / time.Second)
+	}
+	return intervalSec
+}
+
+func setReportIntervalSec(intervalSec int) {
+	if intervalSec < int(minReportInterval/time.Second) {
+		intervalSec = int(minReportInterval / time.Second)
+	}
+	reportIntervalState.Store(int64(intervalSec))
+}
+
+func logPingTargetPolicy() {
+	switch {
+	case allowLocalPingTargets && blockPrivatePingTargets:
+		log.Printf("ping target policy: loopback/link-local targets allowed; private targets blocked")
+	case allowLocalPingTargets:
+		log.Printf("ping target policy: local/private targets allowed")
+	case blockPrivatePingTargets:
+		log.Printf("ping target policy: loopback/link-local/private targets blocked")
+	default:
+		log.Printf("ping target policy: loopback/link-local targets blocked; private targets allowed")
 	}
 }
 
@@ -655,21 +707,33 @@ func pingPollDelay(tasks []PingTask, configuredIntervalSec int, suggestedNextPol
 	return time.Duration(intervalSec) * time.Second
 }
 
-// AGT-6: Validate ping target to prevent SSRF to private/loopback addresses
-func isPrivateOrLoopbackIP(ip net.IP) bool {
-	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+// AGT-6: Validate ping target to prevent unsafe local network probes.
+func isLocalPingIP(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
 		return true
 	}
-	// Check RFC1918 private ranges
+
+	localRanges := []string{
+		"169.254.0.0/16", // link-local
+		"127.0.0.0/8",    // loopback
+		"::1/128",        // IPv6 loopback
+		"fe80::/10",      // IPv6 link-local
+	}
+	for _, cidr := range localRanges {
+		_, ipnet, err := net.ParseCIDR(cidr)
+		if err == nil && ipnet.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPrivatePingIP(ip net.IP) bool {
 	privateRanges := []string{
 		"10.0.0.0/8",
 		"172.16.0.0/12",
 		"192.168.0.0/16",
-		"169.254.0.0/16", // link-local
-		"127.0.0.0/8",    // loopback
-		"::1/128",        // IPv6 loopback
-		"fc00::/7",       // IPv6 unique local
-		"fe80::/10",      // IPv6 link-local
+		"fc00::/7", // IPv6 unique local
 	}
 	for _, cidr := range privateRanges {
 		_, ipnet, err := net.ParseCIDR(cidr)
@@ -680,61 +744,68 @@ func isPrivateOrLoopbackIP(ip net.IP) bool {
 	return false
 }
 
-func validatePingTarget(target string) error {
-	// Extract hostname from target (remove port if present)
-	host := target
-	if strings.Contains(target, ":") {
-		var err error
-		host, _, err = net.SplitHostPort(target)
-		if err != nil {
-			// If split fails, treat entire target as host
-			host = target
+func pingTargetHost(target string) (string, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", fmt.Errorf("target is empty")
+	}
+
+	if parsed, err := url.Parse(target); err == nil && parsed.Scheme != "" {
+		host := parsed.Hostname()
+		if host == "" {
+			return "", fmt.Errorf("target URL is missing a hostname")
 		}
+		return host, nil
 	}
 
-	// Resolve hostname to IP
-	ips, err := net.LookupIP(host)
+	if strings.HasPrefix(target, "-") {
+		return "", fmt.Errorf("target must not start with '-'")
+	}
+
+	if host, _, err := net.SplitHostPort(target); err == nil {
+		return strings.Trim(host, "[]"), nil
+	}
+
+	return strings.Trim(target, "[]"), nil
+}
+
+func validatePingTarget(target string) error {
+	host, err := pingTargetHost(target)
 	if err != nil {
-		return fmt.Errorf("hostname resolution failed: %w", err)
+		return err
+	}
+	if host == "" {
+		return fmt.Errorf("target hostname is empty")
 	}
 
-	// Check if any resolved IP is private/loopback
+	ips := []net.IP{}
+	if ip := net.ParseIP(host); ip != nil {
+		ips = append(ips, ip)
+	} else {
+		resolved, err := net.LookupIP(host)
+		if err != nil {
+			return fmt.Errorf("hostname resolution failed: %w", err)
+		}
+		ips = resolved
+	}
+
 	for _, ip := range ips {
-		if isPrivateOrLoopbackIP(ip) {
-			return fmt.Errorf("target resolves to private/loopback IP: %s", ip)
+		if !allowLocalPingTargets && isLocalPingIP(ip) {
+			return fmt.Errorf("target resolves to blocked local IP: %s", ip)
+		}
+		if blockPrivatePingTargets && isPrivatePingIP(ip) {
+			return fmt.Errorf("target resolves to blocked private IP: %s", ip)
 		}
 	}
 
 	return nil
 }
 
-func normalizePingTarget(target string) (string, error) {
-	target = strings.TrimSpace(target)
-	if target == "" {
-		return "", fmt.Errorf("ping target is empty")
-	}
-	if strings.ContainsAny(target, "\x00\r\n") {
-		return "", fmt.Errorf("ping target contains control characters")
-	}
-	if strings.HasPrefix(target, "-") || (runtime.GOOS == "windows" && strings.HasPrefix(target, "/")) {
-		return "", fmt.Errorf("ping target must not start with an option prefix")
-	}
-	return target, nil
-}
-
 func executeICMPPing(target string) float64 {
-	target, err := normalizePingTarget(target)
-	if err != nil {
-		log.Printf("icmp ping target rejected: %v", err)
+	if err := validatePingTarget(target); err != nil {
+		log.Printf("icmp ping target blocked: %v", err)
 		return -1
 	}
-
-	// AGT-6: Validate target before execution (optional - can be disabled for internal monitoring)
-	// Uncomment to enforce SSRF protection:
-	// if err := validatePingTarget(target); err != nil {
-	// 	log.Printf("ping target validation failed: %v", err)
-	// 	return -1
-	// }
 
 	start := time.Now()
 
@@ -756,18 +827,10 @@ func executeICMPPing(target string) float64 {
 }
 
 func executeTCPPing(target string) float64 {
-	target, err := normalizePingTarget(target)
-	if err != nil {
-		log.Printf("tcp ping target rejected: %v", err)
+	if err := validatePingTarget(target); err != nil {
+		log.Printf("tcp ping target blocked: %v", err)
 		return -1
 	}
-
-	// AGT-6: Validate target before execution (optional)
-	// Uncomment to enforce SSRF protection:
-	// if err := validatePingTarget(target); err != nil {
-	// 	log.Printf("tcp ping target validation failed: %v", err)
-	// 	return -1
-	// }
 
 	// Ensure target has port
 	if !strings.Contains(target, ":") {
@@ -795,6 +858,10 @@ func executeHTTPPing(target string) float64 {
 
 	if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
 		target = "https://" + target
+	}
+	if err := validatePingTarget(target); err != nil {
+		log.Printf("http ping target blocked: %v", err)
+		return -1
 	}
 
 	start := time.Now()
@@ -905,7 +972,7 @@ func runBasicInfoRefresher(interval time.Duration, stop <-chan struct{}) {
 func runHTTPReporter() {
 	log.Println("HTTP reporter started")
 	preparer := &reportPreparer{}
-	currentSampleInterval := normalizeReportDuration(time.Duration(reportInterval) * time.Second)
+	currentSampleInterval := normalizeReportDuration(time.Duration(currentReportIntervalSec()) * time.Second)
 	currentUploadInterval := currentSampleInterval
 	nextUploadAt := time.Now()
 	var pending []Report
@@ -921,12 +988,15 @@ func runHTTPReporter() {
 			(currentSampleInterval < 30*time.Second && policyFetchCounter%(policyFetchInterval/3) == 0)
 
 		if shouldFetchPolicy {
-			if policy, err := fetchAgentPolicy(); err == nil {
+			policy, err := fetchAgentPolicy()
+			if err != nil {
+				log.Printf("HTTP policy fetch failed: %v", err)
+			} else {
 				nextSampleInterval, nextUploadInterval := policyDurations(policy, currentSampleInterval)
 				if nextSampleInterval != currentSampleInterval || nextUploadInterval != currentUploadInterval {
 					currentSampleInterval = nextSampleInterval
 					currentUploadInterval = nextUploadInterval
-					reportInterval = int(currentSampleInterval / time.Second)
+					setReportIntervalSec(int(currentSampleInterval / time.Second))
 					nextUploadAt = time.Now().Add(currentUploadInterval)
 					log.Printf("HTTP policy: mode=%s sample=%s upload=%s viewers=%d ttl=%ds",
 						policy.Mode,
@@ -942,8 +1012,6 @@ func runHTTPReporter() {
 					pending = nil
 					nextUploadAt = time.Now().Add(currentUploadInterval)
 				}
-			} else {
-				log.Printf("HTTP policy fetch failed: %v", err)
 			}
 		}
 
@@ -1005,7 +1073,7 @@ func runWebSocketReporter() {
 		_ = runWebSocketSession(
 			conn,
 			preparer,
-			time.Duration(reportInterval)*time.Second,
+			time.Duration(currentReportIntervalSec())*time.Second,
 			30*time.Second,
 		)
 
@@ -1075,7 +1143,7 @@ func runWebSocketSession(
 			if nextInterval != currentInterval || nextUploadInterval != currentUploadInterval {
 				currentInterval = nextInterval
 				currentUploadInterval = nextUploadInterval
-				reportInterval = int(currentInterval / time.Second)
+				setReportIntervalSec(int(currentInterval / time.Second))
 				log.Printf("WebSocket policy: mode=%s sample=%s upload=%s viewers=%d ttl=%ds",
 					policy.Mode,
 					currentInterval,
@@ -1414,11 +1482,11 @@ func collectReportWithInterval(intervalSec int) Report {
 }
 
 func collectReport() Report {
-	return collectReportWithInterval(reportInterval)
+	return collectReportWithInterval(currentReportIntervalSec())
 }
 
 func (p *reportPreparer) prepare() Report {
-	return p.prepareForInterval(time.Duration(reportInterval) * time.Second)
+	return p.prepareForInterval(time.Duration(currentReportIntervalSec()) * time.Second)
 }
 
 func (p *reportPreparer) prepareForInterval(interval time.Duration) Report {
@@ -1430,7 +1498,7 @@ func (p *reportPreparer) prepareForInterval(interval time.Duration) Report {
 func (p *reportPreparer) prepareReport(report Report) Report {
 	intervalSec := report.ReportInterval
 	if intervalSec < 1 {
-		intervalSec = reportInterval
+		intervalSec = currentReportIntervalSec()
 	}
 	return p.prepareReportForInterval(report, intervalSec)
 }
@@ -1483,7 +1551,7 @@ func (p *reportPreparer) prepareReportForInterval(report Report, intervalSec int
 }
 
 func sendHTTPReport(preparer *reportPreparer) {
-	sendHTTPReportForInterval(preparer, time.Duration(reportInterval)*time.Second)
+	sendHTTPReportForInterval(preparer, time.Duration(currentReportIntervalSec())*time.Second)
 }
 
 func sendHTTPReportForInterval(preparer *reportPreparer, interval time.Duration) {

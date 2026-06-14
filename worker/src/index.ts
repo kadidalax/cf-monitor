@@ -22,7 +22,6 @@ import * as notificationQueue from './db/notification-queue';
 import * as cronHealth from './db/cron-health';
 import * as refreshToken from './auth/refresh-token';
 import * as passwordReset from './auth/password-reset';
-import { repairCounters } from './utils/counter-manager';
 
 // 类型定义
 export type Bindings = {
@@ -462,7 +461,6 @@ const DEFAULT_IDLE_REPORT_INTERVAL_SEC = 600;
 const MIN_EXPECTED_REPORT_INTERVAL_SEC = 0;
 const MAX_EXPECTED_REPORT_INTERVAL_SEC = 3600;
 const HEAVY_SCHEDULED_INTERVAL_MINUTES = 10;
-const COUNTER_REPAIR_INTERVAL_MINUTES = 24 * 60;
 
 function normalizeExpectedReportIntervalSec(value: unknown, fallbackSec = DEFAULT_IDLE_REPORT_INTERVAL_SEC): number {
   const parsed = Number(value);
@@ -979,12 +977,9 @@ async function runScheduled(env: Bindings, options: { forceFull?: boolean } = {}
   if (runHeavyTasks) {
     await runScheduledStep(env, 'cron_cleanup', 'cron_cleanup_error', '记录清理', () => runRecordCleanup(env, context, now));
   }
-  if (options.forceFull || shouldRunScheduledInterval(now, COUNTER_REPAIR_INTERVAL_MINUTES)) {
-    await runCounterRepair(env, now);
-  }
   await runScheduledStep(env, 'cron_notification_queue', 'cron_queue_error', '通知队列处理', () => runNotificationQueueProcessor(env, context, now));
   if (runHeavyTasks) {
-    await runScheduledStep(env, 'cron_token_blacklist', 'cron_token_error', 'Token黑名单清理', () => runTokenBlacklistCleanup(env));
+    await runScheduledStep(env, 'cron_token_blacklist', 'cron_token_error', 'Token黑名单清理', () => runTokenBlacklistCleanup(env, now));
     await runScheduledStep(env, 'cron_load', 'cron_load_error', '负载告警检查', () => runLoadCheck(env, context, now));
   }
   await runScheduledStep(env, 'cron_offline', 'cron_offline_error', '离线告警检查', () => runOfflineCheck(env, context, now));
@@ -996,41 +991,10 @@ async function runScheduled(env: Bindings, options: { forceFull?: boolean } = {}
 /**
  * 清理过期的token黑名单记录
  */
-async function runTokenBlacklistCleanup(env: Bindings): Promise<void> {
+async function runTokenBlacklistCleanup(env: Bindings, now: Date): Promise<void> {
   const deleted = await refreshToken.cleanupExpiredBlacklist(env.DB);
   if (deleted > 0) {
     await db.insertAuditLog(env.DB, 'system', 'token_blacklist_cleanup', `清理过期Token黑名单: ${deleted}条`);
-  }
-}
-
-async function runCounterRepair(env: Bindings, now: Date): Promise<void> {
-  try {
-    const result = await repairCounters(env.DB);
-    if (result.updated > 0 || !result.success) {
-      await db.insertAuditLog(env.DB, 'system', 'history_counter_repair', `历史计数器校准: ${JSON.stringify({
-        success: result.success,
-        updated: result.updated,
-        results: result.results,
-        checked_at: now.toISOString(),
-      })}`, result.success ? 'info' : 'warning');
-    }
-    await bestEffortRecordHealthEvent(
-      env.DB,
-      'history_counter_repair',
-      'ok',
-      `history counters verified; updated=${result.updated}`,
-      { successThrottleMs: 24 * 60 * 60 * 1000 },
-    );
-  } catch (error) {
-    const message = errorDetail(error);
-    console.error('[scheduled] history counter repair failed:', message);
-    await bestEffortRecordHealthEvent(
-      env.DB,
-      'history_counter_repair',
-      'error',
-      `history counter repair failed: ${message}`,
-      { auditAction: 'history_counter_repair_error', auditThrottleMs: 60 * 60 * 1000 },
-    );
   }
 }
 

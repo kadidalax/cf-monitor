@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { normalizeListResponse } from '../api';
+import { apiFetch, normalizeListResponse, publicFetch } from '../api';
 
 describe('api utils', () => {
   describe('normalizeListResponse', () => {
@@ -32,6 +32,16 @@ describe('api utils', () => {
     it('should return empty array for non-array object without data', () => {
       const result = normalizeListResponse({ error: 'something' });
       expect(result).toEqual([]);
+    });
+  });
+
+  describe('public API guard', () => {
+    it('rejects admin paths from apiFetch', async () => {
+      await expect(apiFetch('/admin/settings')).rejects.toThrow(/Admin API requests must use useApi/);
+    });
+
+    it('rejects admin paths from publicFetch', async () => {
+      await expect(publicFetch('/api/admin/settings')).rejects.toThrow(/Admin API requests must use useApi/);
     });
   });
 });
