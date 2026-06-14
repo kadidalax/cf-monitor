@@ -465,9 +465,9 @@ function parseTimeMs(value: string | null | undefined): number {
   return Number.isFinite(ms) ? ms : 0;
 }
 
-export type LoginRateLimitStateByBucket = Map<string, db.LoginRateLimit | null>;
+type LoginRateLimitStateByBucket = Map<string, db.LoginRateLimit | null>;
 
-export async function loadLoginRateLimitStates(
+async function loadLoginRateLimitStates(
   database: D1Database,
   buckets: string[],
 ): Promise<LoginRateLimitStateByBucket> {
@@ -478,7 +478,7 @@ export async function loadLoginRateLimitStates(
   return states;
 }
 
-export function getLoginRetryAfterSeconds(
+function getLoginRetryAfterSeconds(
   states: LoginRateLimitStateByBucket,
   nowMs: number,
 ): number {
@@ -490,7 +490,7 @@ export function getLoginRetryAfterSeconds(
   return Math.ceil((lockedUntilMs - nowMs) / 1000);
 }
 
-export async function recordLoginFailure(
+async function recordLoginFailure(
   database: D1Database,
   buckets: string[],
   nowMs: number,
@@ -530,7 +530,7 @@ async function clearLoginFailures(database: D1Database, buckets: string[]): Prom
   }
 }
 
-export async function cleanupExpiredLoginRateLimits(database: D1Database, nowMs: number): Promise<boolean> {
+async function cleanupExpiredLoginRateLimits(database: D1Database, nowMs: number): Promise<boolean> {
   if (
     lastLoginRateLimitCleanupAt > 0 &&
     nowMs - lastLoginRateLimitCleanupAt < LOGIN_RATE_LIMIT_CLEANUP_INTERVAL_MS
@@ -545,19 +545,11 @@ export async function cleanupExpiredLoginRateLimits(database: D1Database, nowMs:
   return true;
 }
 
-export function resetLoginRateLimitCleanupForTests(): void {
-  lastLoginRateLimitCleanupAt = 0;
-}
-
 function loginFailureAuditThrottleKey(username: string, ip: string, reason: string): string {
   return `${reason}:${ip}:${normalizeLoginUsername(username)}`;
 }
 
-export function resetLoginFailureAuditThrottleForTests(): void {
-  loginFailureAuditThrottle.clear();
-}
-
-export async function auditLoginFailure(
+async function auditLoginFailure(
   database: D1Database,
   username: string,
   ip: string,
@@ -955,4 +947,4 @@ publicRoutes.get('/live', async (c) => {
   return withPublicCache(await stub.fetch(c.req.raw), PUBLIC_LIVE_CACHE_SECONDS);
 });
 
-export { publicRoutes, generateToken, hashPassword, verifyPassword };
+export { publicRoutes };

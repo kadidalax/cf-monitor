@@ -90,17 +90,7 @@ export function invalidateAgentPingTaskCache(): void {
   agentPingIntervalCache = null;
 }
 
-/**
- * 获取认证缓存统计信息（用于监控）
- */
-export function getAgentAuthCacheStats() {
-  return {
-    client_cache: agentAuthCache.getStats(),
-    identity_cache: agentIdentityAuthCache.getStats(),
-  };
-}
-
-export async function getAgentClientByToken(database: D1Database, token: string): Promise<db.Client | null> {
+async function getAgentClientByToken(database: D1Database, token: string): Promise<db.Client | null> {
   const now = Date.now();
   const cached = agentAuthCache.get(token, now);
   if (cached !== null) {
@@ -687,4 +677,4 @@ clientRoutes.post('/ping/result', clientIdentityAuth, async (c) => {
   }
 });
 
-export { clientRoutes, clientAuth, clientIdentityAuth };
+export { clientRoutes };

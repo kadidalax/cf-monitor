@@ -1,7 +1,7 @@
 import { formatBytes } from './format';
 
-export const BYTES_PER_GB = 1024 * 1024 * 1024;
-export const BYTES_PER_TB = BYTES_PER_GB * 1024;
+const BYTES_PER_GB = 1024 * 1024 * 1024;
+const BYTES_PER_TB = BYTES_PER_GB * 1024;
 
 export const TRAFFIC_LIMIT_TYPES = [
   { label: '总计', value: 'sum' },
@@ -19,8 +19,8 @@ export const TRAFFIC_LIMIT_UNITS = [
 export const BANDWIDTH_UNITS = ['Mbps', 'Gbps'] as const;
 
 export type TrafficLimitMode = 'quota' | 'unlimited' | 'bandwidth';
-export type TrafficLimitUnit = typeof TRAFFIC_LIMIT_UNITS[number]['value'];
-export type BandwidthUnit = typeof BANDWIDTH_UNITS[number];
+type TrafficLimitUnit = typeof TRAFFIC_LIMIT_UNITS[number]['value'];
+type BandwidthUnit = typeof BANDWIDTH_UNITS[number];
 
 export interface TrafficLimitFormValue {
   mode: TrafficLimitMode;
@@ -38,7 +38,7 @@ export function parseTrafficLimitType(type?: string | null): string {
   return TRAFFIC_LIMIT_TYPES.some((option) => option.value === value) ? value : 'sum';
 }
 
-export function parseBandwidthLimit(type?: string | null): { value: string; unit: BandwidthUnit } | null {
+function parseBandwidthLimit(type?: string | null): { value: string; unit: BandwidthUnit } | null {
   const raw = String(type || '').trim();
   if (!raw.startsWith(BANDWIDTH_PREFIX)) return null;
   const bandwidth = raw.slice(BANDWIDTH_PREFIX.length).trim();
@@ -115,7 +115,7 @@ export function serializeTrafficLimitFormValue(value: TrafficLimitFormValue): { 
   };
 }
 
-export function formatTrafficLimitType(type?: string | null): string {
+function formatTrafficLimitType(type?: string | null): string {
   const value = parseTrafficLimitType(type);
   return TRAFFIC_LIMIT_TYPES.find((option) => option.value === value)?.label || '总计';
 }

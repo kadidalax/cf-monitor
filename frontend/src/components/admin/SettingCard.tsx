@@ -3,7 +3,7 @@
  * Provides collapsible sections with consistent styling
  */
 import React, { useState } from 'react';
-import { Card, Flex, Text, Switch, TextField, TextArea } from '@radix-ui/themes';
+import { Card, Flex, Text, Switch, TextField } from '@radix-ui/themes';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 
 /* ========== Collapsible SettingCard ========== */
@@ -64,7 +64,7 @@ interface SettingRowProps {
   children: React.ReactNode;
 }
 
-export function SettingRow({ label, description, children }: SettingRowProps) {
+function SettingRow({ label, description, children }: SettingRowProps) {
   return (
     <Flex justify="between" align="center" style={{ padding: '8px 0' }}>
       <Flex direction="column" style={{ flex: 1, minWidth: 0 }}>
@@ -116,32 +116,6 @@ export function SettingInput({ label, description, value, onChange, type, placeh
         value={value}
         onChange={(e: React.ChangeEvent<HTMLInputElement>) => onChange(e.target.value)}
         type={(type || 'text') as any}
-        placeholder={placeholder}
-      />
-    </div>
-  );
-}
-
-/* ========== Setting Textarea ========== */
-interface SettingTextareaProps {
-  label: string;
-  description?: string;
-  value: string;
-  onChange: (value: string) => void;
-  rows?: number;
-  placeholder?: string;
-}
-
-export function SettingTextarea({ label, description, value, onChange, rows, placeholder }: SettingTextareaProps) {
-  return (
-    <div style={{ marginBottom: 12 }}>
-      <Text size="2" weight="medium" style={{ display: 'block', marginBottom: 4 }}>{label}</Text>
-      {description && <Text size="1" color="gray" style={{ display: 'block', marginBottom: 6 }}>{description}</Text>}
-      <TextArea
-        style={{ width: 'min(720px, 100%)' }}
-        value={value}
-        onChange={e => onChange(e.target.value)}
-        rows={rows || 3}
         placeholder={placeholder}
       />
     </div>

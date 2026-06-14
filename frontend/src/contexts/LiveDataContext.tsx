@@ -65,7 +65,7 @@ interface LiveDataViewerExpiredMessage {
   timestamp: number;
 }
 
-export function buildLiveWebSocketUrl(origin: string, pathname = '/api/ws/live', viewerToken?: string): string {
+function buildLiveWebSocketUrl(origin: string, pathname = '/api/ws/live', viewerToken?: string): string {
   const url = new URL(pathname, origin);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   if (viewerToken) {
@@ -90,7 +90,7 @@ function isViewerExpiredMessage(value: any): value is LiveDataViewerExpiredMessa
   return value?.type === 'viewer_expired' && typeof value.timestamp === 'number';
 }
 
-export function applyLiveUpdate(
+function applyLiveUpdate(
   current: LiveDataResponse | null,
   message: LiveDataUpdateMessage,
 ): LiveDataResponse {
@@ -131,7 +131,7 @@ export function applyLiveUpdate(
   };
 }
 
-export function applyLiveRemove(
+function applyLiveRemove(
   current: LiveDataResponse | null,
   message: LiveDataRemoveMessage,
 ): LiveDataResponse | null {

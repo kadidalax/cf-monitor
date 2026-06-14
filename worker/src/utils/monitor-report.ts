@@ -2,7 +2,7 @@ import type { MonitorRecord } from '../db/queries';
 
 type AnyRecord = Record<string, any>;
 
-export const MAX_GPU_RECORDS_PER_REPORT = 16;
+const MAX_GPU_RECORDS_PER_REPORT = 16;
 const MAX_GPU_DEVICE_NAME_LENGTH = 128;
 const MAX_PERCENT = 100;
 const MAX_TEMPERATURE_C = 150;

@@ -1,11 +1,11 @@
 import type { PingTask } from '../db/queries';
 
-export const PING_TASK_TYPES = ['icmp', 'tcp', 'http'] as const;
-export const MIN_PING_INTERVAL_SEC = 60;
-export const MAX_PING_INTERVAL_SEC = 86_400;
-export const MAX_PING_TASK_NAME_LENGTH = 128;
-export const MAX_PING_TARGET_LENGTH = 512;
-export const MAX_PING_TASK_CLIENTS = 500;
+const PING_TASK_TYPES = ['icmp', 'tcp', 'http'] as const;
+const MIN_PING_INTERVAL_SEC = 60;
+const MAX_PING_INTERVAL_SEC = 86_400;
+const MAX_PING_TASK_NAME_LENGTH = 128;
+const MAX_PING_TARGET_LENGTH = 512;
+const MAX_PING_TASK_CLIENTS = 500;
 
 type PingTaskType = typeof PING_TASK_TYPES[number];
 

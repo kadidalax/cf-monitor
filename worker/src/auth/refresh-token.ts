@@ -11,9 +11,9 @@ import { sign, verify } from 'hono/jwt';
 
 const MIN_JWT_SECRET_BYTES = 32;
 export const ACCESS_TOKEN_EXPIRY_SEC = 60 * 60; // 1小时
-export const REFRESH_TOKEN_EXPIRY_SEC = 30 * 24 * 60 * 60; // 30天
+const REFRESH_TOKEN_EXPIRY_SEC = 30 * 24 * 60 * 60; // 30天
 
-export class AuthConfigurationError extends Error {
+class AuthConfigurationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'AuthConfigurationError';
@@ -42,7 +42,7 @@ export interface TokenPair {
   refreshTokenExpiresAt: number;
 }
 
-export interface AccessTokenPayload {
+interface AccessTokenPayload {
   [key: string]: unknown;
   userId: string;
   username: string;
@@ -106,36 +106,6 @@ export async function generateTokenPair(
 }
 
 /**
- * 验证Access Token
- */
-export async function verifyAccessToken(
-  token: string,
-  secret: string,
-): Promise<AccessTokenPayload | null> {
-  try {
-    const payload = await verify(token, secret, 'HS256');
-
-    if (
-      !payload ||
-      payload.type !== 'access' ||
-      typeof payload.userId !== 'string' ||
-      typeof payload.username !== 'string'
-    ) {
-      return null;
-    }
-
-    return {
-      userId: payload.userId,
-      username: payload.username,
-      sessionVersion: typeof payload.sessionVersion === 'number' ? payload.sessionVersion : 0,
-      type: 'access',
-    };
-  } catch {
-    return null;
-  }
-}
-
-/**
  * 验证Refresh Token
  */
 export async function verifyRefreshToken(
@@ -179,14 +149,6 @@ function generateJti(): string {
 /**
  * Token黑名单管理（使用D1数据库）
  */
-
-export interface TokenBlacklist {
-  jti: string;
-  userId: string;
-  revokedAt: string;
-  expiresAt: string;
-  reason: string;
-}
 
 /**
  * 将Token加入黑名单
@@ -254,16 +216,4 @@ export async function revokeAllUserTokens(
         updated_at = ?
     WHERE uuid = ?
   `).bind(now, userId).run();
-}
-
-/**
- * 滑动过期时间策略（可选）
- * 如果access token还有超过一半的有效期，则不刷新
- */
-export function shouldRefreshAccessToken(expiresAt: number): boolean {
-  const now = Math.floor(Date.now() / 1000);
-  const remaining = expiresAt - now;
-  const halfLife = ACCESS_TOKEN_EXPIRY_SEC / 2;
-
-  return remaining < halfLife;
 }

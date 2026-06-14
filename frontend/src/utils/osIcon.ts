@@ -4,7 +4,7 @@
  * Ported from Komari's osImageHelper.ts with emoji fallback added.
  */
 
-export interface OSConfig {
+interface OSConfig {
   name: string;
   image: string;
   icon: string;
@@ -67,11 +67,6 @@ function findOS(osString: string): OSConfig {
 /** Get OS image path for <img src=""> usage */
 export function getOSImage(osString: string): string {
   return findOS(osString).image;
-}
-
-/** Get emoji icon for inline display */
-export function getOSIcon(osString: string): string {
-  return findOS(osString).icon;
 }
 
 /** Get friendly OS name */

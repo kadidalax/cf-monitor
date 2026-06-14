@@ -190,7 +190,7 @@ type LiveClientMeta = Pick<db.Client, 'uuid' | 'name'> & { hidden?: unknown };
 
 let allowedClientIdsCache: { value: Set<string>; expiresAt: number } | null = null;
 
-export function invalidateAllowedClientIdsCache(): void {
+function invalidateAllowedClientIdsCache(): void {
   allowedClientIdsCache = null;
 }
 
@@ -218,13 +218,13 @@ async function removeLiveClient(c: any, uuid: string): Promise<void> {
   }));
 }
 
-export async function getClientCreateConflict(database: D1Database, uuid: string, token: string): Promise<'uuid' | 'token' | null> {
+async function getClientCreateConflict(database: D1Database, uuid: string, token: string): Promise<'uuid' | 'token' | null> {
   if (await db.clientExists(database, uuid)) return 'uuid';
   if (await db.clientTokenExists(database, token)) return 'token';
   return null;
 }
 
-export async function generateUniqueClientToken(
+async function generateUniqueClientToken(
   database: D1Database,
   randomUuid: () => string = () => crypto.randomUUID(),
 ): Promise<string | null> {
@@ -393,7 +393,7 @@ function isEncryptedBackupEnvelope(value: unknown): boolean {
       (value as Record<string, unknown>).encrypted === true);
 }
 
-export async function getAllowedClientIds(database: D1Database): Promise<Set<string>> {
+async function getAllowedClientIds(database: D1Database): Promise<Set<string>> {
   const now = Date.now();
   if (allowedClientIdsCache && allowedClientIdsCache.expiresAt > now) {
     return new Set(allowedClientIdsCache.value);
@@ -443,7 +443,7 @@ function loadNotificationReferencesSpecificClients(input: unknown): boolean {
     hasNonEmptyStringList((input as Record<string, unknown>).clients);
 }
 
-export async function getAllowedClientIdsForPingTask(
+async function getAllowedClientIdsForPingTask(
   database: D1Database,
   input: unknown,
 ): Promise<Set<string> | undefined> {
@@ -452,7 +452,7 @@ export async function getAllowedClientIdsForPingTask(
     : undefined;
 }
 
-export async function getAllowedClientIdsForLoadNotification(
+async function getAllowedClientIdsForLoadNotification(
   database: D1Database,
   input: unknown,
 ): Promise<Set<string>> {
@@ -732,7 +732,7 @@ async function getCapacityRowCounts(
   return value;
 }
 
-export async function buildCapacityEstimate(database: D1Database, options: { forceCounts?: boolean; scanCounts?: boolean } = {}) {
+async function buildCapacityEstimate(database: D1Database, options: { forceCounts?: boolean; scanCounts?: boolean } = {}) {
   const nowMs = Date.now();
   if (!options.forceCounts && capacityEstimateCache && capacityEstimateCache.expiresAt > nowMs) {
     return {

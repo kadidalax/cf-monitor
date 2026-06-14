@@ -21,8 +21,7 @@
     "db:reset:local": "wrangler d1 execute cf-monitor-db --local --file=./migrations/000_reset_local.sql && npm run db:migrate:local && npm run db:seed:local"
   },
   "dependencies": {
-    "hono": "^4.0.0",
-    "jose": "^5.0.0"
+    "hono": "^4.0.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.0.0",

@@ -57,7 +57,7 @@ export function buildMonitorChartData(records: MonitorHistoryRecord[]): MonitorC
   }));
 }
 
-export function buildMonitorChartAxisData(rangeMs: number, now = Date.now()): MonitorChartPoint[] {
+function buildMonitorChartAxisData(rangeMs: number, now = Date.now()): MonitorChartPoint[] {
   const end = Number.isFinite(now) ? now : Date.now();
   const start = end - Math.max(rangeMs, 1);
 

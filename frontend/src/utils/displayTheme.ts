@@ -1,4 +1,4 @@
-export const displayThemes = ['monitor', 'next'] as const;
+const displayThemes = ['monitor', 'next'] as const;
 
 export type DisplayTheme = typeof displayThemes[number];
 

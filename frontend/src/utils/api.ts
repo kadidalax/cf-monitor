@@ -22,29 +22,6 @@ export function normalizeListResponse<T = unknown>(payload: unknown): T[] {
   return [];
 }
 
-export async function apiFetch<T = any>(
-  path: string,
-  options: RequestInit = {},
-): Promise<T> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...(options.headers as Record<string, string> || {}),
-  };
-
-  const res = await fetch(withApiBase(path), {
-    ...options,
-    headers,
-    credentials: 'same-origin',
-  });
-
-  if (!res.ok) {
-    const errBody = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(errBody.error || `HTTP ${res.status}`);
-  }
-
-  return res.json();
-}
-
 export async function publicFetch<T = any>(path: string): Promise<T> {
   const res = await fetch(withApiBase(path));
   if (!res.ok) {

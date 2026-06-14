@@ -6,10 +6,10 @@ export const BACKUP_SCHEMA_ID = 'cf-monitor.backup';
 export const ENCRYPTED_BACKUP_SCHEMA_ID = 'cf-monitor.encrypted-backup';
 export const BACKUP_VERSION = '2.0.0';
 export const BACKUP_SCOPE = 'configuration';
-export const BACKUP_SENSITIVE_WARNING = 'This backup may contain Agent token hashes, Telegram credentials, and other configuration secrets. Store it securely.';
+const BACKUP_SENSITIVE_WARNING = 'This backup may contain Agent token hashes, Telegram credentials, and other configuration secrets. Store it securely.';
 export const BACKUP_ENCRYPTION_ALGORITHM = 'AES-GCM';
-export const BACKUP_KDF = 'PBKDF2-SHA256';
-export const BACKUP_KDF_ITERATIONS = 210_000;
+const BACKUP_KDF = 'PBKDF2-SHA256';
+const BACKUP_KDF_ITERATIONS = 210_000;
 export const BACKUP_EXCLUDED_MODULES = [
   'users',
   'records',
@@ -22,7 +22,7 @@ export const BACKUP_EXCLUDED_MODULES = [
   'notification_incidents',
 ];
 export const MAX_BACKUP_BYTES = 5 * 1024 * 1024;
-export const MIN_BACKUP_PASSWORD_BYTES = 12;
+const MIN_BACKUP_PASSWORD_BYTES = 12;
 
 const MAX_CLIENTS = 1000;
 const MAX_PING_TASKS = 1000;
@@ -54,7 +54,7 @@ export interface BackupData {
   load_notifications?: any[];
 }
 
-export interface EncryptedBackupData {
+interface EncryptedBackupData {
   schema: typeof ENCRYPTED_BACKUP_SCHEMA_ID;
   version: string;
   scope: typeof BACKUP_SCOPE;
@@ -435,39 +435,6 @@ function validateLoadNotifications(items: unknown[], errors: string[]): any[] {
       last_notified: optionalTimeField(item.last_notified, `load_notifications[${index}].last_notified`, errors),
     }];
   });
-}
-
-/**
- * Redact sensitive data from backup for plaintext export.
- * Removes agent token credentials and Telegram bot token.
- * Should only be used when exporting plaintext (unencrypted) backups.
- */
-export function redactSensitiveBackupData(backup: BackupData): BackupData {
-  const redacted: BackupData = {
-    ...backup,
-    sensitive: false,
-    warning: 'Plaintext backup with sensitive data redacted. Agent tokens and Telegram credentials excluded.',
-  };
-
-  // Redact client tokens - remove token_hash (the bearer credential) and token
-  if (backup.clients && backup.clients.length > 0) {
-    redacted.clients = backup.clients.map(client => {
-      const { token, token_hash, token_prefix, ...safe } = client;
-      return {
-        ...safe,
-        // Keep prefix for display purposes only (not a credential)
-        token_prefix: token_prefix || '',
-      };
-    });
-  }
-
-  // Redact Telegram credentials from settings
-  if (backup.settings) {
-    const { telegram_bot_token, telegram_chat_id, ...safeSettings } = backup.settings;
-    redacted.settings = safeSettings;
-  }
-
-  return redacted;
 }
 
 export function validateBackup(input: unknown): BackupValidationResult {

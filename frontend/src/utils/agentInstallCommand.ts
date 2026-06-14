@@ -30,10 +30,8 @@ export const defaultAgentInstallOptions: AgentInstallOptions = {
   nicExclude: '',
 };
 
-export const CF_MONITOR_BRANCH = 'main';
-export const CF_MONITOR_AGENT_RELEASE_TAG = 'agent-latest';
-export const CF_MONITOR_AGENT_SCRIPT_BASE = `https://raw.githubusercontent.com/${CF_MONITOR_REPOSITORY}/refs/heads/${CF_MONITOR_BRANCH}/agent`;
-export const CF_MONITOR_RELEASE_BASE = `https://github.com/${CF_MONITOR_REPOSITORY}/releases/download/${CF_MONITOR_AGENT_RELEASE_TAG}`;
+const CF_MONITOR_BRANCH = 'main';
+const CF_MONITOR_AGENT_SCRIPT_BASE = `https://raw.githubusercontent.com/${CF_MONITOR_REPOSITORY}/refs/heads/${CF_MONITOR_BRANCH}/agent`;
 
 export function normalizeServerUrl(value: string, fallback: string) {
   const raw = value.trim() || fallback;
@@ -41,30 +39,21 @@ export function normalizeServerUrl(value: string, fallback: string) {
   return withScheme.replace(/\/+$/g, '');
 }
 
-export function normalizeProxyUrl(value: string) {
+function normalizeProxyUrl(value: string) {
   const raw = value.trim();
   if (!raw) return '';
   const withScheme = /^https?:\/\//i.test(raw) ? raw : `http://${raw}`;
   return withScheme.replace(/\/+$/g, '');
 }
 
-export function proxiedUrl(url: string, ghproxy = '') {
+function proxiedUrl(url: string, ghproxy = '') {
   const proxy = normalizeProxyUrl(ghproxy);
   if (!proxy) return url;
   return `${proxy}/${url}`;
 }
 
-export function cfMonitorAgentScriptUrl(scriptFile: 'install-linux.sh' | 'install-windows.ps1', ghproxy = '') {
+function cfMonitorAgentScriptUrl(scriptFile: 'install-linux.sh' | 'install-windows.ps1', ghproxy = '') {
   return proxiedUrl(`${CF_MONITOR_AGENT_SCRIPT_BASE}/${scriptFile}`, ghproxy);
-}
-
-export function cfMonitorAgentBinaryUrl(platform: AgentInstallPlatform, ghproxy = '') {
-  const file = platform === 'windows'
-    ? 'cf-monitor-agent-windows-amd64.exe'
-    : platform === 'macos'
-      ? 'cf-monitor-agent-darwin-amd64'
-      : 'cf-monitor-agent-linux-amd64';
-  return proxiedUrl(`${CF_MONITOR_RELEASE_BASE}/${file}`, ghproxy);
 }
 
 function shellQuote(value: string) {
@@ -205,6 +194,3 @@ export function buildAgentUninstallAllCommand({
       );
   }
 }
-
-export const buildKomariAgentInstallCommand = buildAgentInstallCommand;
-export const komariAgentScriptUrl = cfMonitorAgentScriptUrl;

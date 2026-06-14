@@ -13,7 +13,7 @@ interface SettingDefinition {
   minLengthWhenSet?: number;
 }
 
-export const REMOVED_SETTING_KEYS = new Set([
+const REMOVED_SETTING_KEYS = new Set([
   'allow_cors',
   'private_site',
   'private_site_password',
@@ -191,7 +191,7 @@ export const SETTING_SCHEMA = {
   },
 } as const satisfies Record<string, SettingDefinition>;
 
-export type SettingKey = keyof typeof SETTING_SCHEMA;
+type SettingKey = keyof typeof SETTING_SCHEMA;
 
 const SETTING_KEYS = Object.keys(SETTING_SCHEMA) as SettingKey[];
 export const PUBLIC_SETTING_KEYS = SETTING_KEYS.filter(key => SETTING_SCHEMA[key].public);
@@ -260,7 +260,7 @@ function normalizeSafeImageUrl(value: string): string | null {
   }
 }
 
-export function isKnownSettingKey(key: string): key is SettingKey {
+function isKnownSettingKey(key: string): key is SettingKey {
   return SETTING_KEY_SET.has(key);
 }
 

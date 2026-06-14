@@ -1,6 +1,6 @@
 import { ClientInfo, LiveDataMap, LiveRecord } from '../types';
 
-export type OfflinePosition = 'first' | 'keep' | 'last';
+type OfflinePosition = 'first' | 'keep' | 'last';
 export type NodeStatusFilter = 'all' | 'online' | 'offline';
 export type AdminSortKey =
   | 'manual'

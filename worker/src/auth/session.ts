@@ -41,7 +41,7 @@ function isValidCsrfToken(token: string | undefined): token is string {
   return typeof token === 'string' && /^[A-Za-z0-9_-]{32,128}$/.test(token);
 }
 
-export function getAdminCsrfToken(c: any): string | null {
+function getAdminCsrfToken(c: any): string | null {
   const token = getCookie(c, ADMIN_CSRF_COOKIE);
   return isValidCsrfToken(token) ? token : null;
 }

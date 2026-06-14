@@ -1,5 +1,5 @@
 export const monitorYAxisWidth = 32;
-export const wideYAxisWidth = 48;
+const wideYAxisWidth = 48;
 export const pingYAxisWidth = 56;
 
 export const monitorYAxisProps = {

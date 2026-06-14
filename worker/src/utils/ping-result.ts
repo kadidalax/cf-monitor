@@ -4,7 +4,7 @@ export const MAX_PING_RESULTS_PER_REPORT = 50;
 export const MAX_PING_VALUE_MS = 60_000;
 export const PING_LOSS_VALUE = -1;
 
-export interface ValidatedPingResult {
+interface ValidatedPingResult {
   taskId: number;
   value: number;
 }
@@ -19,7 +19,7 @@ function asObject(value: unknown): Record<string, unknown> {
     : {};
 }
 
-export function pingResultPayload(input: unknown): unknown {
+function pingResultPayload(input: unknown): unknown {
   const body = asObject(input);
   if (Array.isArray(body.results)) return body.results;
   if (body.type === 'ping_result' && body.data !== undefined) return body.data;

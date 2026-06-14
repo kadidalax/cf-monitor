@@ -63,20 +63,7 @@ Object.entries(regionAliases).forEach(([code, aliases]) => {
   aliases.forEach((alias) => aliasToCountryCode.set(normalizeAlias(alias), code));
 });
 
-export const flagMap: Record<string, string> = Object.fromEntries(
-  Object.keys(regionAliases).map((code) => [code, countryCodeToFlagEmoji(code)]),
-);
-
-function countryCodeToFlagEmoji(code: string) {
-  const normalized = code.toUpperCase();
-  if (!/^[A-Z]{2}$/.test(normalized) || normalized === DEFAULT_FLAG_CODE) return '🏳️';
-
-  return Array.from(normalized)
-    .map((char) => String.fromCodePoint(char.charCodeAt(0) - ASCII_ALPHA_START + REGIONAL_INDICATOR_START))
-    .join('');
-}
-
-export function getCountryCodeFromFlagEmoji(value: string): string | null {
+function getCountryCodeFromFlagEmoji(value: string): string | null {
   const chars = Array.from(value.trim());
   if (chars.length !== 2) return null;
 
@@ -99,7 +86,7 @@ export function getCountryCodeFromFlagEmoji(value: string): string | null {
   return null;
 }
 
-export function resolveFlagCode(region?: string): string {
+function resolveFlagCode(region?: string): string {
   const raw = (region || '').trim();
   if (!raw) return DEFAULT_FLAG_CODE;
 
@@ -123,10 +110,6 @@ export function resolveFlagCode(region?: string): string {
   }
 
   return DEFAULT_FLAG_CODE;
-}
-
-export function guessFlag(region: string): string {
-  return countryCodeToFlagEmoji(resolveFlagCode(region));
 }
 
 interface FlagProps {

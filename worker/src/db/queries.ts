@@ -186,11 +186,6 @@ export async function listClients(db: D1Database): Promise<Client[]> {
   return result.results;
 }
 
-export async function countClients(db: D1Database): Promise<number> {
-  const row = await db.prepare('SELECT COUNT(*) AS count FROM clients').first<{ count: number }>();
-  return Number(row?.count || 0);
-}
-
 export interface ClientCapacityCounts {
   clients: number;
   gpu_clients: number;
@@ -302,69 +297,6 @@ export async function createClient(db: D1Database, client: Partial<Client>): Pro
   const token = await normalizeClientTokenForStorage(client);
   await db.prepare(`INSERT INTO clients (uuid, token, token_hash, token_prefix, name, sort_order) VALUES (?, ?, ?, ?, ?, ?)`)
     .bind(client.uuid, token.storedToken, token.tokenHash, token.tokenPrefix, client.name || '', sortOrder).run();
-}
-
-export async function replaceAllClients(db: D1Database, clients: Partial<Client>[]): Promise<void> {
-  // Atomic delete+insert: DELETE must be in the same batch to prevent data loss if batch fails
-  const batch: D1PreparedStatement[] = [db.prepare('DELETE FROM clients')];
-
-  if (clients.length === 0) {
-    await db.batch(batch);
-    return;
-  }
-
-  const stmt = db.prepare(`
-    INSERT INTO clients (
-      uuid, token, token_hash, token_prefix, name, cpu_name, virtualization, arch, cpu_cores, os,
-      kernel_version, gpu_name, ipv4, ipv6, region, remark, public_remark,
-      mem_total, swap_total, disk_total, version, price, billing_cycle,
-      auto_renewal, currency, expired_at, "group", tags, hidden, traffic_limit,
-      traffic_limit_type, sort_order, last_report_interval_sec, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  for (const [index, client] of clients.entries()) {
-    const token = await normalizeClientTokenForStorage(client);
-    batch.push(stmt.bind(
-      client.uuid || crypto.randomUUID(),
-      token.storedToken,
-      token.tokenHash,
-      token.tokenPrefix,
-      client.name || '',
-      client.cpu_name || '',
-      client.virtualization || '',
-      client.arch || '',
-      client.cpu_cores || 0,
-      client.os || '',
-      client.kernel_version || '',
-      client.gpu_name || '',
-      client.ipv4 || '',
-      client.ipv6 || '',
-      client.region || '',
-      client.remark || '',
-      client.public_remark || '',
-      client.mem_total || 0,
-      client.swap_total || 0,
-      client.disk_total || 0,
-      client.version || '',
-      client.price || 0,
-      client.billing_cycle || 0,
-      client.auto_renewal ? 1 : 0,
-      client.currency || '$',
-      client.expired_at || null,
-      client.group || '',
-      client.tags || '',
-      client.hidden ? 1 : 0,
-      client.traffic_limit || 0,
-      client.traffic_limit_type || 'max',
-      client.sort_order || index + 1,
-      client.last_report_interval_sec || null,
-      client.created_at || new Date().toISOString(),
-      client.updated_at || new Date().toISOString(),
-    ));
-  }
-
-  await db.batch(batch);
 }
 
 const CLIENT_UPDATE_COLUMNS: Record<string, string> = {
@@ -654,26 +586,11 @@ async function deleteRowsByIdBatch(
   return deleted;
 }
 
-export async function insertRecord(db: D1Database, record: MonitorRecord): Promise<void> {
-  await db.prepare(`INSERT INTO records (client, time, cpu, gpu, ram, ram_total, swap, swap_total, load, temp, disk, disk_total, net_in, net_out, net_total_up, net_total_down, process_count, connections, connections_udp, uptime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .bind(record.client, record.time, record.cpu, record.gpu, record.ram, record.ram_total,
-      record.swap, record.swap_total, record.load, record.temp, record.disk, record.disk_total,
-      record.net_in, record.net_out, record.net_total_up, record.net_total_down,
-      record.process_count, record.connections, record.connections_udp, record.uptime).run();
-}
-
 export async function getRecentRecords(db: D1Database, client: string, limit: number = 30): Promise<MonitorRecord[]> {
   const result = await db.prepare(
     'SELECT * FROM records WHERE client = ? ORDER BY time DESC LIMIT ?'
   ).bind(client, limit).all<MonitorRecord>();
   return result.results.reverse();
-}
-
-export async function getRecordsByTimeRange(db: D1Database, client: string, start: string, end: string): Promise<MonitorRecord[]> {
-  const result = await db.prepare(
-    'SELECT * FROM records WHERE client = ? AND time >= ? AND time <= ? ORDER BY time ASC'
-  ).bind(client, start, end).all<MonitorRecord>();
-  return result.results;
 }
 
 export type LoadNotificationMetric = 'cpu' | 'ram' | 'load' | 'disk' | 'temp';
@@ -691,31 +608,6 @@ const LOAD_METRIC_SQL: Record<LoadNotificationMetric, string> = {
   disk: 'CASE WHEN disk_total > 0 THEN (CAST(disk AS REAL) / disk_total) * 100 ELSE 0 END',
   temp: 'COALESCE(temp, 0)',
 };
-
-export async function getLoadMetricWindowStats(
-  db: D1Database,
-  client: string,
-  start: string,
-  end: string,
-  metric: LoadNotificationMetric,
-  threshold: number,
-): Promise<LoadMetricWindowStats> {
-  const expression = LOAD_METRIC_SQL[metric] || LOAD_METRIC_SQL.cpu;
-  const row = await db.prepare(
-    `SELECT
-      COUNT(*) AS samples,
-      COALESCE(SUM(CASE WHEN ${expression} >= ? THEN 1 ELSE 0 END), 0) AS exceeded,
-      COALESCE(AVG(${expression}), 0) AS avg_value
-    FROM records
-    WHERE client = ? AND time >= ? AND time <= ?`
-  ).bind(threshold, client, start, end).first<LoadMetricWindowStats>();
-
-  return {
-    samples: Number(row?.samples || 0),
-    exceeded: Number(row?.exceeded || 0),
-    avg_value: Number(row?.avg_value || 0),
-  };
-}
 
 export async function getLoadMetricWindowStatsForClients(
   db: D1Database,
@@ -947,56 +839,6 @@ export async function deleteOldPingRecords(db: D1Database, beforeTime: string, o
   };
 }
 
-export async function getLatestRecordTimes(db: D1Database): Promise<Array<{ client: string; last_time: string }>> {
-  const result = await db.prepare(
-    'SELECT client, MAX(time) as last_time FROM records GROUP BY client'
-  ).all<{ client: string; last_time: string }>();
-  return result.results;
-}
-
-export async function getLatestRecordTimesForClients(
-  db: D1Database,
-  clients: string[],
-): Promise<Array<{ client: string; last_time: string }>> {
-  const uniqueClients = [...new Set(
-    clients
-      .filter((client): client is string => typeof client === 'string')
-      .map(client => client.trim())
-      .filter(Boolean),
-  )];
-  if (uniqueClients.length === 0) return [];
-
-  const rows: Array<{ client: string; last_time: string }> = [];
-  const stmt = db.prepare('SELECT client, time AS last_time FROM records WHERE client = ? ORDER BY time DESC LIMIT 1');
-  for (let index = 0; index < uniqueClients.length; index += D1_BATCH_CHUNK_SIZE) {
-    const chunk = uniqueClients.slice(index, index + D1_BATCH_CHUNK_SIZE);
-    const results = await db.batch(chunk.map(client => stmt.bind(client)));
-    for (const result of results) {
-      const row = result.results?.[0] as { client?: string; last_time?: string } | undefined;
-      if (row?.client && row.last_time) {
-        rows.push({ client: row.client, last_time: row.last_time });
-      }
-    }
-  }
-
-  return rows;
-}
-
-export async function getLatestRecords(db: D1Database): Promise<MonitorRecord[]> {
-  const result = await db.prepare(`
-    SELECT r.*
-    FROM records r
-    INNER JOIN (
-      SELECT client, MAX(time) AS time
-      FROM records
-      GROUP BY client
-    ) latest
-      ON r.client = latest.client AND r.time = latest.time
-    ORDER BY r.time DESC
-  `).all<MonitorRecord>();
-  return result.results;
-}
-
 export async function clearAllRecords(db: D1Database): Promise<{ records: number; gpu_records: number; gpu_snapshots: number; ping_records: number; ping_snapshots: number }> {
   return {
     records: await deleteRowsByIdBatch(db, 'records', '', [], { maxBatches: FULL_DELETE_BATCH_LIMIT }),
@@ -1204,21 +1046,6 @@ export async function setSetting(db: D1Database, key: string, value: string): Pr
   await db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').bind(key, value).run();
 }
 
-export async function replaceAllSettings(db: D1Database, settings: Record<string, string>): Promise<void> {
-  // Atomic delete+insert: DELETE must be in the same batch to prevent data loss if batch fails
-  const batch: D1PreparedStatement[] = [db.prepare('DELETE FROM settings')];
-  const entries = Object.entries(settings);
-
-  if (entries.length === 0) {
-    await db.batch(batch);
-    return;
-  }
-
-  const stmt = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)');
-  batch.push(...entries.map(([key, value]) => stmt.bind(key, value)));
-  await db.batch(batch);
-}
-
 export async function getAllSettings(db: D1Database): Promise<Record<string, string>> {
   const result = await db.prepare('SELECT key, value FROM settings').all<{ key: string; value: string }>();
   const settings: Record<string, string> = {};
@@ -1307,36 +1134,6 @@ export async function createPingTask(db: D1Database, task: PingTask): Promise<vo
   const sortOrder = task.sort_order && task.sort_order > 0 ? task.sort_order : Number(maxOrder?.max_order || 0) + 1;
   await db.prepare('INSERT INTO ping_tasks (name, clients, all_clients, type, target, interval_sec, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)')
     .bind(task.name, JSON.stringify(task.clients), task.all_clients ? 1 : 0, task.type, task.target, task.interval_sec, sortOrder).run();
-}
-
-export async function replaceAllPingTasks(db: D1Database, tasks: PingTask[]): Promise<void> {
-  // Atomic delete+insert: DELETE must be in the same batch to prevent data loss if batch fails
-  const batch: D1PreparedStatement[] = [db.prepare('DELETE FROM ping_tasks')];
-
-  if (tasks.length === 0) {
-    await db.batch(batch);
-    return;
-  }
-
-  const stmt = db.prepare(`
-    INSERT INTO ping_tasks (id, name, clients, all_clients, type, target, interval_sec, sort_order)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  batch.push(...tasks.map((task) =>
-    stmt.bind(
-      task.id || null,
-      task.name || '',
-      JSON.stringify(task.clients || []),
-      task.all_clients ? 1 : 0,
-      task.type || 'icmp',
-      task.target || '',
-      task.interval_sec || 60,
-      task.sort_order || task.id || 0,
-    ),
-  ));
-
-  await db.batch(batch);
 }
 
 const PING_TASK_UPDATE_COLUMNS: Record<string, string> = {
@@ -1433,11 +1230,6 @@ export interface PingTaskHistoryRequest {
   taskId: number;
   limit?: number;
   intervalSec?: number;
-}
-
-export async function insertPingRecord(db: D1Database, client: string, taskId: number, time: string, value: number): Promise<void> {
-  await db.prepare('INSERT INTO ping_records (client, task_id, time, value) VALUES (?, ?, ?, ?)')
-    .bind(client, taskId, time, value).run();
 }
 
 export async function insertPingSnapshot(db: D1Database, client: string, time: string, results: PingSnapshotInput[]): Promise<void> {
@@ -1662,7 +1454,7 @@ export async function getPingRecordsPaged(
 // ============ 通知设置 ============
 
 export type NotificationDeliveryStatus = 'sent' | 'failed' | 'skipped';
-export type NotificationIncidentStatus = 'open' | 'resolved';
+type NotificationIncidentStatus = 'open' | 'resolved';
 
 export interface NotificationDeliveryInput {
   notification_type: string;
@@ -1703,41 +1495,9 @@ export interface NotificationIncidentInput {
   detected_at: string;
 }
 
-export async function getOfflineNotification(db: D1Database, client: string): Promise<any> {
-  return db.prepare('SELECT * FROM offline_notifications WHERE client = ?').bind(client).first();
-}
-
 export async function listOfflineNotifications(db: D1Database): Promise<any[]> {
   const result = await db.prepare('SELECT * FROM offline_notifications').all();
   return result.results;
-}
-
-export async function replaceAllOfflineNotifications(db: D1Database, notifications: any[]): Promise<void> {
-  // Atomic delete+insert: DELETE must be in the same batch to prevent data loss if batch fails
-  const batch: D1PreparedStatement[] = [db.prepare('DELETE FROM offline_notifications')];
-
-  if (notifications.length === 0) {
-    await db.batch(batch);
-    return;
-  }
-
-  const stmt = db.prepare(`
-    INSERT INTO offline_notifications (client, enable, grace_period, last_notified)
-    VALUES (?, ?, ?, ?)
-  `);
-
-  batch.push(
-    ...notifications.map((item) =>
-      stmt.bind(
-        item.client,
-        item.enable ? 1 : 0,
-        item.grace_period || 180,
-        item.last_notified || null,
-      ),
-    ),
-  );
-
-  await db.batch(batch);
 }
 
 export async function setOfflineNotification(db: D1Database, client: string, enable: boolean, gracePeriod: number): Promise<boolean> {
@@ -1802,7 +1562,7 @@ export async function insertNotificationDelivery(db: D1Database, delivery: Notif
     .run();
 }
 
-export function makeNotificationIncidentKey(notificationType: string, target: string): string {
+function makeNotificationIncidentKey(notificationType: string, target: string): string {
   const safeType = normalizeNotificationDeliveryText(notificationType, 'unknown', 64);
   const safeTarget = normalizeNotificationDeliveryText(target, '', 192);
   return `${safeType}:${safeTarget}`.slice(0, 256);
@@ -2005,41 +1765,9 @@ export async function markLoadNotificationSent(db: D1Database, id: number, time:
     .bind(time, time, time, id).run();
 }
 
-export async function getExpiryNotification(db: D1Database, client: string): Promise<any> {
-  return db.prepare('SELECT * FROM expiry_notifications WHERE client = ?').bind(client).first();
-}
-
 export async function listExpiryNotifications(db: D1Database): Promise<any[]> {
   const result = await db.prepare('SELECT * FROM expiry_notifications').all();
   return result.results;
-}
-
-export async function replaceAllExpiryNotifications(db: D1Database, notifications: any[]): Promise<void> {
-  // Atomic delete+insert: DELETE must be in the same batch to prevent data loss if batch fails
-  const batch: D1PreparedStatement[] = [db.prepare('DELETE FROM expiry_notifications')];
-
-  if (notifications.length === 0) {
-    await db.batch(batch);
-    return;
-  }
-
-  const stmt = db.prepare(`
-    INSERT INTO expiry_notifications (client, enable, advance_days, last_notified)
-    VALUES (?, ?, ?, ?)
-  `);
-
-  batch.push(
-    ...notifications.map((item) =>
-      stmt.bind(
-        item.client,
-        item.enable ? 1 : 0,
-        item.advance_days || 7,
-        item.last_notified || null,
-      ),
-    ),
-  );
-
-  await db.batch(batch);
 }
 
 export async function setExpiryNotification(db: D1Database, client: string, enable: boolean, advanceDays: number): Promise<boolean> {
@@ -2142,39 +1870,6 @@ export async function createLoadNotification(db: D1Database, data: any): Promise
       normalizeLoadNotificationValue('ratio', data.ratio),
       normalizeLoadNotificationValue('interval_min', data.interval_min),
     ).run();
-}
-
-export async function replaceAllLoadNotifications(db: D1Database, notifications: any[]): Promise<void> {
-  // Atomic delete+insert: DELETE must be in the same batch to prevent data loss if batch fails
-  const batch: D1PreparedStatement[] = [db.prepare('DELETE FROM load_notifications')];
-
-  if (notifications.length === 0) {
-    await db.batch(batch);
-    return;
-  }
-
-  const stmt = db.prepare(`
-    INSERT INTO load_notifications (
-      id, name, clients, metric, threshold, ratio, interval_min, last_notified
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  batch.push(
-    ...notifications.map((item) =>
-      stmt.bind(
-        item.id || null,
-        normalizeLoadNotificationValue('name', item.name),
-        normalizeLoadNotificationValue('clients', item.clients),
-        normalizeLoadNotificationValue('metric', item.metric),
-        normalizeLoadNotificationValue('threshold', item.threshold),
-        normalizeLoadNotificationValue('ratio', item.ratio),
-        normalizeLoadNotificationValue('interval_min', item.interval_min),
-        normalizeLoadNotificationValue('last_notified', item.last_notified),
-      ),
-    ),
-  );
-
-  await db.batch(batch);
 }
 
 export async function updateLoadNotification(db: D1Database, id: number, data: any): Promise<boolean> {
@@ -2536,11 +2231,6 @@ export async function insertAuditLog(db: D1Database, user: string, action: strin
   const sanitizedDetail = sanitizeAuditDetail(detail);
   await db.prepare('INSERT INTO audit_logs (time, user, action, detail, level) VALUES (?, ?, ?, ?, ?)')
     .bind(new Date().toISOString(), user, action, sanitizedDetail, normalizeAuditLogLevel(level)).run();
-}
-
-export async function listAuditLogs(db: D1Database, limit: number = 100): Promise<any[]> {
-  const result = await db.prepare('SELECT * FROM audit_logs ORDER BY time DESC LIMIT ?').bind(limit).all();
-  return result.results;
 }
 
 export async function listAuditLogsPaged(

@@ -19,7 +19,7 @@ export type AdminJwtPayload = {
   sessionVersion: number;
 };
 
-export function requireJwtSecret(env: JwtEnv): string {
+function requireJwtSecret(env: JwtEnv): string {
   const secret = env.JWT_SECRET?.trim() ?? '';
   const secretBytes = new TextEncoder().encode(secret).byteLength;
 

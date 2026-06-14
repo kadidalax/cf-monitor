@@ -11,7 +11,7 @@ export interface HealthEvent {
   detail?: string;
 }
 
-export const HEALTH_COMPONENTS = [
+const HEALTH_COMPONENTS = [
   'd1_write_probe',
   'do_record_persistence',
   'ping_persistence',
