@@ -746,7 +746,7 @@ func executeICMPPing(target string) float64 {
 		cmd = exec.Command("ping", "-c", "1", "-W", "2", "--", target)
 	}
 
-	err := cmd.Run()
+	err = cmd.Run()
 	elapsed := time.Since(start).Milliseconds()
 
 	if err != nil {
@@ -940,10 +940,11 @@ func runHTTPReporter() {
 					pending = append(pending, preparer.prepareForInterval(currentSampleInterval))
 					sendHTTPReports(pending)
 					pending = nil
-				nextUploadAt = time.Now().Add(currentUploadInterval)
+					nextUploadAt = time.Now().Add(currentUploadInterval)
+				}
+			} else {
+				log.Printf("HTTP policy fetch failed: %v", err)
 			}
-		} else {
-			log.Printf("HTTP policy fetch failed: %v", err)
 		}
 
 		// AGT-4: Increment policy fetch counter
