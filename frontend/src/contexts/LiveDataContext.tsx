@@ -171,7 +171,12 @@ export function useLiveData() {
   return useContext(LiveDataContext);
 }
 
-export function LiveDataProvider({ children }: { children: React.ReactNode }) {
+interface LiveDataProviderProps {
+  children: React.ReactNode;
+  viewer?: boolean;
+}
+
+export function LiveDataProvider({ children, viewer = true }: LiveDataProviderProps) {
   const [liveData, setLiveData] = useState<LiveDataResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -179,13 +184,14 @@ export function LiveDataProvider({ children }: { children: React.ReactNode }) {
   const [viewerExpiresAt, setViewerExpiresAt] = useState<number | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectAttemptsRef = useRef(0); // FE-2: Track reconnection attempts for exponential backoff
   const wsRef = useRef<WebSocket | null>(null);
   const wsOpenRef = useRef(false);
   const wsExpiredRef = useRef(false);
   const pollConfigRef = useRef<LivePollConfig>(DEFAULT_LIVE_POLL_CONFIG);
   const fallbackExpiresAtRef = useRef<number | null>(null);
   const activeSinceRef = useRef<number | null>(
-    typeof document === 'undefined' || document.hidden ? null : Date.now(),
+    viewer && (typeof document === 'undefined' || !document.hidden) ? Date.now() : null,
   );
 
   const expireViewerSession = useCallback(() => {
@@ -234,6 +240,8 @@ export function LiveDataProvider({ children }: { children: React.ReactNode }) {
   }, [fetchLiveData]);
 
   useEffect(() => {
+    if (!viewer) return;
+
     let cancelled = false;
 
     const applySettings = (settings: Record<string, unknown> | null | undefined) => {
@@ -277,9 +285,11 @@ export function LiveDataProvider({ children }: { children: React.ReactNode }) {
       cancelled = true;
       window.removeEventListener(LIVE_POLL_SETTINGS_UPDATED_EVENT, handleSettingsUpdated);
     };
-  }, []);
+  }, [viewer]);
 
   useEffect(() => {
+    if (!viewer) return;
+
     let cancelled = false;
 
     const clearReconnectTimeout = () => {
@@ -313,6 +323,7 @@ export function LiveDataProvider({ children }: { children: React.ReactNode }) {
       ws.addEventListener('open', () => {
         if (wsRef.current !== ws) return;
         wsOpenRef.current = true;
+        reconnectAttemptsRef.current = 0; // FE-2: Reset backoff counter on successful connection
         setError(null);
       });
 
@@ -365,9 +376,16 @@ export function LiveDataProvider({ children }: { children: React.ReactNode }) {
         }
         clearReconnectTimeout();
         if (shouldReconnectLiveWebSocket({ expired: wsExpiredRef.current, hidden: document.hidden })) {
+          // FE-2: Exponential backoff with jitter to prevent thundering herd
+          const baseDelay = Math.min(30_000, pollConfigRef.current.idleIntervalMs);
+          const backoffDelay = Math.min(baseDelay * Math.pow(2, reconnectAttemptsRef.current), 300_000); // Cap at 5 minutes
+          const jitter = Math.floor(Math.random() * 1000); // 0-1s jitter
+          const delay = backoffDelay + jitter;
+
+          reconnectAttemptsRef.current += 1;
           reconnectTimeoutRef.current = setTimeout(
             () => { void connect(); },
-            Math.min(30_000, pollConfigRef.current.idleIntervalMs),
+            delay,
           );
         }
       });
@@ -385,7 +403,7 @@ export function LiveDataProvider({ children }: { children: React.ReactNode }) {
         ws.close();
       }
     };
-  }, [ensureFallbackViewerWindow, expireViewerSession, fetchLiveData]);
+  }, [ensureFallbackViewerWindow, expireViewerSession, fetchLiveData, viewer]);
 
   // 轮询
   useEffect(() => {
@@ -400,6 +418,44 @@ export function LiveDataProvider({ children }: { children: React.ReactNode }) {
         timeoutRef.current = null;
       }
     };
+
+    if (!viewer) {
+      const scheduleSnapshotPoll = () => {
+        clearPollTimeout();
+        if (cancelled) return;
+        timeoutRef.current = setTimeout(
+          pollSnapshot,
+          DEFAULT_LIVE_POLL_CONFIG.idleIntervalMs,
+        );
+      };
+
+      const pollSnapshot = async () => {
+        if (polling || cancelled) return;
+        polling = true;
+        try {
+          await fetchLiveData();
+        } finally {
+          polling = false;
+          scheduleSnapshotPoll();
+        }
+      };
+
+      const handleVisibility = () => {
+        if (!document.hidden) {
+          clearPollTimeout();
+          void pollSnapshot();
+        }
+      };
+
+      document.addEventListener('visibilitychange', handleVisibility);
+      void pollSnapshot();
+
+      return () => {
+        cancelled = true;
+        clearPollTimeout();
+        document.removeEventListener('visibilitychange', handleVisibility);
+      };
+    }
 
     const scheduleNextPoll = () => {
       clearPollTimeout();
@@ -496,7 +552,7 @@ export function LiveDataProvider({ children }: { children: React.ReactNode }) {
       window.removeEventListener('keydown', handleUserActivity);
       window.removeEventListener('scroll', handleUserActivity);
     };
-  }, [ensureFallbackViewerWindow, expireViewerSession, fetchLiveData]);
+  }, [ensureFallbackViewerWindow, expireViewerSession, fetchLiveData, viewer]);
 
   return (
     <LiveDataContext.Provider value={{ liveData, loading, error, viewerExpired, viewerExpiresAt, refresh }}>

@@ -12,6 +12,7 @@ import {
   Wifi,
 } from 'lucide-react';
 import { formatBytes } from '../utils/format';
+import { useIsMobile } from '../hooks/useIsMobile';
 
 interface DetailsGridProps {
   client: {
@@ -88,6 +89,8 @@ function DetailItem({
 }
 
 function DetailRemarkItem({ value }: { value: string }) {
+  const isMobile = useIsMobile();
+
   return (
     <div className="DetailsGrid-item DetailsGrid-remark-item">
       <span className="DetailsGrid-icon" aria-hidden="true">
@@ -99,13 +102,18 @@ function DetailRemarkItem({ value }: { value: string }) {
         </Text>
         <Popover.Root>
           <Popover.Trigger>
-            <button type="button" className="DetailsGrid-remark-trigger" title={value}>
+            <button type="button" className="DetailsGrid-remark-trigger" title={value} aria-label="查看完整备注">
               <Text size="1" color="gray" className="DetailsGrid-value DetailsGrid-remark-preview" as="span">
                 {value}
               </Text>
             </button>
           </Popover.Trigger>
-          <Popover.Content side="right" align="start" className="DetailsGrid-remark-popover">
+          <Popover.Content
+            side={isMobile ? 'bottom' : 'right'}
+            align={isMobile ? 'center' : 'start'}
+            sideOffset={8}
+            className="DetailsGrid-remark-popover"
+          >
             <Text size="1" weight="bold" className="DetailsGrid-label">
               备注
             </Text>

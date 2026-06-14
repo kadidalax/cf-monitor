@@ -9,6 +9,7 @@
   ],
   "scripts": {
     "build": "npm --prefix frontend run build && npm --prefix worker run build",
+    "test": "npm --prefix frontend run test && npm --prefix worker run test",
     "verify": "npm run build",
     "deploy": "npm run build && node ./worker/node_modules/wrangler/bin/wrangler.js deploy --config wrangler.toml",
     "dev:worker": "npm --prefix worker run dev",

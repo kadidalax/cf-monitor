@@ -3,6 +3,7 @@ set -euo pipefail
 
 SERVER=""
 TOKEN=""
+TOKEN_FROM_STDIN="0"
 NODE_NAME="$(hostname)"
 INTERVAL="3"
 PING_INTERVAL="60"
@@ -14,7 +15,12 @@ SOURCE_URL=""
 BUILD_FROM_SOURCE="0"
 BINARY=""
 BINARY_URL=""
+BINARY_SHA256=""
+CHECKSUM_URL=""
+SOURCE_SHA256=""
+SKIP_CHECKSUM="0"
 AUTO_BINARY_URL="0"
+BINARY_CHECKSUM_REQUIRED="0"
 DRY_RUN="0"
 UNINSTALL="0"
 UNINSTALL_ALL="0"
@@ -37,12 +43,13 @@ IGNORE_UNSAFE_CERT="0"
 usage() {
   cat <<'EOF'
 Usage:
-  sudo ./install-linux.sh --server https://worker.example.com --token TOKEN [options]
+  sudo ./install-linux.sh --server https://worker.example.com --token-stdin [options]
   sudo ./install-linux.sh --uninstall [options]
 
 Options:
   --server URL              Worker URL, required.
-  --token TOKEN             Agent token from admin panel. Required.
+  --token TOKEN             Agent token from admin panel. Prefer --token-stdin to avoid shell history.
+  --token-stdin             Read the agent token from standard input.
   --name NAME               Node name, default: hostname.
   --interval SECONDS        Report interval, default: 3.
   --ping-interval SECONDS   Ping task poll interval, default: 60.
@@ -54,9 +61,13 @@ Options:
                             Komari-compatible alias for --service-name.
   --binary PATH             Existing agent binary.
   --binary-url URL          Download a prebuilt agent binary from this URL.
+  --binary-sha256 HEX       Expected SHA256 for --binary-url.
+  --checksum-url URL        URL of a SHA256SUMS file.
+  --skip-checksum           Skip binary SHA256 verification.
   --release-tag TAG         GitHub release tag used for default binary downloads, default: agent-latest.
   --build-from-source       Build from local source or GitHub source archive. Requires Go.
   --source-url URL          Source archive used with --build-from-source.
+  --source-sha256 HEX       Required SHA256 for downloaded source archives unless --skip-checksum is set.
   --proxy URL               Proxy used for --binary-url downloads, for example http://127.0.0.1:10808.
   --mount-include LIST      Comma-separated mountpoint/device patterns included in disk totals.
   --mount-exclude LIST      Comma-separated mountpoint/device patterns excluded from disk totals.
@@ -145,6 +156,150 @@ download_file() {
   fi
 }
 
+is_sha256_hex() {
+  [[ "$1" =~ ^[A-Fa-f0-9]{64}$ ]]
+}
+
+sha256_file() {
+  local file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}'
+  else
+    echo "sha256sum or shasum is required to verify downloads." >&2
+    exit 1
+  fi
+}
+
+url_basename() {
+  local url="${1%%\?*}"
+  url="${url%/}"
+  printf '%s' "${url##*/}"
+}
+
+checksum_from_file() {
+  local checksum_file="$1"
+  local expected_name="$2"
+  local line hash name
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    set -- $line
+    hash="${1:-}"
+    name="${2:-}"
+    name="${name#\*}"
+    name="${name#./}"
+    if is_sha256_hex "$hash" && [[ "$name" == "$expected_name" ]]; then
+      printf '%s' "$hash"
+      return 0
+    fi
+  done < "$checksum_file"
+
+  return 1
+}
+
+verify_binary_sha256() {
+  local file="$1"
+  local source_url="$2"
+  local checksum_required="$3"
+  local expected="${BINARY_SHA256}"
+  local expected_name
+  expected_name="$(url_basename "$source_url")"
+
+  if [[ "$SKIP_CHECKSUM" == "1" ]]; then
+    echo "Warning: binary SHA256 verification skipped." >&2
+    return 0
+  fi
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    if [[ -n "$expected" || -n "$CHECKSUM_URL" || "$checksum_required" == "1" ]]; then
+      echo "[dry-run] verify SHA256 for ${expected_name}"
+    fi
+    return 0
+  fi
+
+  if [[ -z "$expected" && -n "$CHECKSUM_URL" ]]; then
+    local checksum_file
+    checksum_file="$(mktemp /tmp/cf-monitor-checksums.XXXXXX)"
+    if download_file "$CHECKSUM_URL" "$checksum_file"; then
+      expected="$(checksum_from_file "$checksum_file" "$expected_name" || true)"
+    elif [[ "$checksum_required" == "1" ]]; then
+      rm -f "$checksum_file"
+      echo "Failed to download required checksum file: $CHECKSUM_URL" >&2
+      exit 1
+    fi
+    rm -f "$checksum_file"
+  fi
+
+  if [[ -z "$expected" ]]; then
+    if [[ "$checksum_required" == "1" ]]; then
+      echo "Missing SHA256 checksum for ${expected_name}." >&2
+      exit 1
+    fi
+    echo "Warning: no SHA256 checksum provided for ${expected_name}; downloaded binary was not verified." >&2
+    return 0
+  fi
+
+  if ! is_sha256_hex "$expected"; then
+    echo "Invalid SHA256 checksum: $expected" >&2
+    exit 1
+  fi
+
+  local actual expected_lower actual_lower
+  actual="$(sha256_file "$file")"
+  expected_lower="$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')"
+  actual_lower="$(printf '%s' "$actual" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$actual_lower" != "$expected_lower" ]]; then
+    echo "SHA256 mismatch for ${expected_name}." >&2
+    echo "Expected: ${expected_lower}" >&2
+    echo "Actual:   ${actual_lower}" >&2
+    exit 1
+  fi
+
+  echo "Verified SHA256 for ${expected_name}."
+}
+
+verify_source_sha256() {
+  local file="$1"
+  local source_url="$2"
+  local expected="${SOURCE_SHA256}"
+  local expected_name
+  expected_name="$(url_basename "$source_url")"
+
+  if [[ "$SKIP_CHECKSUM" == "1" ]]; then
+    echo "Warning: source archive SHA256 verification skipped." >&2
+    return 0
+  fi
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "[dry-run] verify source SHA256 for ${expected_name}" >&2
+    return 0
+  fi
+
+  if [[ -z "$expected" ]]; then
+    echo "Missing SHA256 checksum for source archive ${expected_name}. Pass --source-sha256, --binary-url, --binary, or --skip-checksum." >&2
+    exit 1
+  fi
+
+  if ! is_sha256_hex "$expected"; then
+    echo "Invalid source SHA256 checksum: $expected" >&2
+    exit 1
+  fi
+
+  local actual expected_lower actual_lower
+  actual="$(sha256_file "$file")"
+  expected_lower="$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')"
+  actual_lower="$(printf '%s' "$actual" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$actual_lower" != "$expected_lower" ]]; then
+    echo "SHA256 mismatch for source archive ${expected_name}." >&2
+    echo "Expected: ${expected_lower}" >&2
+    echo "Actual:   ${actual_lower}" >&2
+    exit 1
+  fi
+
+  echo "Verified SHA256 for source archive ${expected_name}." >&2
+}
+
 resolve_build_dir() {
   if [[ -f "$SCRIPT_DIR/main.go" ]]; then
     printf '%s' "$SCRIPT_DIR"
@@ -165,6 +320,7 @@ resolve_build_dir() {
   local source_url="${SOURCE_URL:-https://github.com/${CF_MONITOR_REPOSITORY}/archive/refs/heads/${CF_MONITOR_BRANCH}.tar.gz}"
   source_url="$(with_github_proxy "$source_url")"
   download_file "$source_url" "$source_archive" >&2
+  verify_source_sha256 "$source_archive" "$source_url"
 
   if [[ "$DRY_RUN" == "1" ]]; then
     echo "[dry-run] tar -xzf \"$source_archive\" -C \"$source_dir\"" >&2
@@ -283,6 +439,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --server) SERVER="${2:-}"; shift 2 ;;
     --token) TOKEN="${2:-}"; shift 2 ;;
+    --token-stdin) TOKEN_FROM_STDIN="1"; shift ;;
     --name) NODE_NAME="${2:-}"; shift 2 ;;
     --interval) INTERVAL="${2:-}"; shift 2 ;;
     --ping-interval) PING_INTERVAL="${2:-}"; shift 2 ;;
@@ -294,6 +451,10 @@ while [[ $# -gt 0 ]]; do
     --source-url) SOURCE_URL="${2:-}"; shift 2 ;;
     --binary) BINARY="${2:-}"; shift 2 ;;
     --binary-url) BINARY_URL="${2:-}"; shift 2 ;;
+    --binary-sha256) BINARY_SHA256="${2:-}"; shift 2 ;;
+    --checksum-url) CHECKSUM_URL="${2:-}"; shift 2 ;;
+    --source-sha256) SOURCE_SHA256="${2:-}"; shift 2 ;;
+    --skip-checksum) SKIP_CHECKSUM="1"; shift ;;
     --release-tag) CF_MONITOR_RELEASE_TAG="${2:-}"; shift 2 ;;
     --proxy) PROXY="${2:-}"; shift 2 ;;
     --mount-include) MOUNT_INCLUDE="${2:-}"; shift 2 ;;
@@ -358,8 +519,21 @@ if [[ "$UNINSTALL" == "1" ]]; then
   exit 0
 fi
 
+if [[ -z "$TOKEN" && -n "${CF_MONITOR_TOKEN:-}" ]]; then
+  TOKEN="$CF_MONITOR_TOKEN"
+fi
+
+if [[ -z "$TOKEN" && "$TOKEN_FROM_STDIN" == "1" ]]; then
+  IFS= read -r TOKEN || true
+fi
+
+if [[ -z "$TOKEN" && -t 0 && "$DRY_RUN" != "1" ]]; then
+  read -r -s -p "Agent token: " TOKEN
+  printf '\n'
+fi
+
 if [[ -z "$SERVER" || -z "$TOKEN" ]]; then
-  echo "--server and --token are required for install or upgrade." >&2
+  echo "--server and an agent token are required for install or upgrade." >&2
   usage
   exit 1
 fi
@@ -389,9 +563,16 @@ if [[ -n "$BINARY" ]]; then
     exit 1
   fi
   WORK_BIN="$BINARY"
+  if [[ -n "$BINARY_SHA256" || -n "$CHECKSUM_URL" ]]; then
+    verify_binary_sha256 "$WORK_BIN" "$BINARY" "0"
+  fi
 else
   if [[ -z "$BINARY_URL" && "$BUILD_FROM_SOURCE" != "1" ]]; then
     DEFAULT_BINARY_URL="$(default_binary_url)" || exit 1
+    if [[ -z "$CHECKSUM_URL" ]]; then
+      CHECKSUM_URL="$(with_github_proxy "${CF_MONITOR_RELEASE_BASE}/SHA256SUMS")"
+    fi
+    BINARY_CHECKSUM_REQUIRED="1"
     if ! BINARY_URL="$(with_github_proxy "$DEFAULT_BINARY_URL")"; then
       exit 1
     fi
@@ -403,10 +584,12 @@ if [[ -n "$BINARY_URL" ]]; then
   if [[ "$DRY_RUN" == "1" ]]; then
     WORK_BIN="/tmp/cf-monitor-agent.dry-run"
     download_file "$BINARY_URL" "$WORK_BIN"
+    verify_binary_sha256 "$WORK_BIN" "$BINARY_URL" "$BINARY_CHECKSUM_REQUIRED"
   else
     WORK_BIN="$(mktemp /tmp/cf-monitor-agent.XXXXXX)"
     if download_file "$BINARY_URL" "$WORK_BIN"; then
       chmod 0755 "$WORK_BIN"
+      verify_binary_sha256 "$WORK_BIN" "$BINARY_URL" "$BINARY_CHECKSUM_REQUIRED"
     elif [[ "$AUTO_BINARY_URL" == "1" ]]; then
       echo "Prebuilt agent binary was not found at ${BINARY_URL}; falling back to source build." >&2
       rm -f "$WORK_BIN"
@@ -464,6 +647,17 @@ EnvironmentFile=${ENV_FILE}
 ExecStart=${INSTALL_DIR}/cf-monitor-agent --interval ${INTERVAL} --ping-interval ${PING_INTERVAL}
 Restart=always
 RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

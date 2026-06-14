@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { Flex, Card, Text, Heading, Badge, Grid, Box, Separator } from '@radix-ui/themes';
 import { Monitor, Cloud, Database, Zap } from 'lucide-react';
 

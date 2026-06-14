@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { applyThemeClass, defaultThemeMode, normalizeThemeMode } from '../utils/themeAppearance';
 import type { ThemeMode } from '../utils/themeAppearance';
+import { syncThemeColorMeta } from '../utils/themeColorMeta';
 
 interface ThemeContextType {
   theme: ThemeMode;
@@ -36,6 +37,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     applyThemeClass(document.documentElement, theme, systemDark);
+    syncThemeColorMeta();
   }, [theme, systemDark]);
 
   const setTheme = useCallback((t: ThemeMode) => {

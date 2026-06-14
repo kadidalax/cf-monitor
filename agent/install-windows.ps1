@@ -4,6 +4,8 @@ param(
 
   [string]$Token,
 
+  [Security.SecureString]$TokenSecure,
+
   [string]$Name = $env:COMPUTERNAME,
   [int]$Interval = 3,
   [int]$PingInterval = 60,
@@ -16,6 +18,8 @@ param(
   [switch]$BuildFromSource,
   [string]$BinaryPath = "",
   [string]$BinaryUrl = "",
+  [string]$BinarySha256 = "",
+  [string]$ChecksumUrl = "",
   [string]$ReleaseTag = "agent-latest",
   [string]$Proxy = "",
   [string]$MountInclude = "",
@@ -27,6 +31,7 @@ param(
   [switch]$IgnoreUnsafeCert,
   [string]$InstallGhproxy = "",
   [switch]$DryRun,
+  [switch]$SkipChecksum,
   [switch]$Uninstall,
   [switch]$UninstallAll,
   [switch]$Yes,
@@ -84,6 +89,33 @@ function Set-InstanceDefaults {
   }
 }
 
+function ConvertFrom-SecureStringPlainText {
+  param([Security.SecureString]$Value)
+  if ($null -eq $Value) {
+    return ""
+  }
+  $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Value)
+  try {
+    return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
+  } finally {
+    if ($ptr -ne [IntPtr]::Zero) {
+      [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
+    }
+  }
+}
+
+function Resolve-AgentToken {
+  if ([string]::IsNullOrWhiteSpace($script:Token) -and $null -ne $TokenSecure) {
+    $script:Token = ConvertFrom-SecureStringPlainText $TokenSecure
+  }
+  if ([string]::IsNullOrWhiteSpace($script:Token) -and -not [string]::IsNullOrWhiteSpace($env:CF_MONITOR_TOKEN)) {
+    $script:Token = $env:CF_MONITOR_TOKEN
+  }
+  if ([string]::IsNullOrWhiteSpace($script:Token) -and -not $Uninstall -and -not $UninstallAll -and -not $DryRun) {
+    $script:Token = ConvertFrom-SecureStringPlainText (Read-Host "Agent token" -AsSecureString)
+  }
+}
+
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repository = "kadidalax/cf-monitor"
 $branch = "main"
@@ -136,6 +168,101 @@ function Invoke-DownloadFile {
     $downloadParams.Proxy = $Proxy
   }
   Invoke-WebRequest @downloadParams
+}
+
+function Test-Sha256Hex {
+  param([string]$Value)
+  return $Value -match '^[A-Fa-f0-9]{64}$'
+}
+
+function Get-UrlLeaf {
+  param([string]$Url)
+  $withoutQuery = ($Url -split '\?')[0].TrimEnd('/')
+  if ([string]::IsNullOrWhiteSpace($withoutQuery)) {
+    return ""
+  }
+  return [Uri]::UnescapeDataString(($withoutQuery -split '/')[-1])
+}
+
+function Get-ChecksumFromFile {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ChecksumFile,
+    [Parameter(Mandatory = $true)]
+    [string]$ExpectedName
+  )
+
+  foreach ($line in Get-Content -LiteralPath $ChecksumFile) {
+    $parts = $line.Trim() -split '\s+'
+    if ($parts.Count -lt 2) {
+      continue
+    }
+    $hash = $parts[0]
+    $name = ($parts[1] -replace '^\*', '') -replace '^\./', ''
+    if ((Test-Sha256Hex $hash) -and $name -eq $ExpectedName) {
+      return $hash
+    }
+  }
+  return ""
+}
+
+function Test-BinaryChecksum {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$FilePath,
+    [Parameter(Mandatory = $true)]
+    [string]$SourceUrl,
+    [bool]$Required
+  )
+
+  $expectedName = Get-UrlLeaf $SourceUrl
+  $expected = $BinarySha256.Trim()
+
+  if ($SkipChecksum) {
+    Write-Warning "Binary SHA256 verification skipped."
+    return
+  }
+
+  if ($DryRun) {
+    if (-not [string]::IsNullOrWhiteSpace($expected) -or -not [string]::IsNullOrWhiteSpace($ChecksumUrl) -or $Required) {
+      Write-Host "[dry-run] Verify SHA256 for $expectedName"
+    }
+    return
+  }
+
+  if ([string]::IsNullOrWhiteSpace($expected) -and -not [string]::IsNullOrWhiteSpace($ChecksumUrl)) {
+    $checksumFile = Join-Path $env:TEMP ("cf-monitor-checksums-" + [Guid]::NewGuid().ToString("N") + ".txt")
+    try {
+      Invoke-DownloadFile -Url $ChecksumUrl -OutFile $checksumFile
+      $expected = Get-ChecksumFromFile -ChecksumFile $checksumFile -ExpectedName $expectedName
+    } catch {
+      if ($Required) {
+        throw "Failed to download required checksum file: $ChecksumUrl"
+      }
+    } finally {
+      Remove-Item -LiteralPath $checksumFile -Force -ErrorAction SilentlyContinue
+    }
+  }
+
+  if ([string]::IsNullOrWhiteSpace($expected)) {
+    if ($Required) {
+      throw "Missing SHA256 checksum for $expectedName."
+    }
+    Write-Warning "No SHA256 checksum provided for $expectedName; downloaded binary was not verified."
+    return
+  }
+
+  if (-not (Test-Sha256Hex $expected)) {
+    throw "Invalid SHA256 checksum: $expected"
+  }
+
+  $actual = (Get-FileHash -LiteralPath $FilePath -Algorithm SHA256).Hash.ToLowerInvariant()
+  $expectedLower = $expected.ToLowerInvariant()
+  if ($actual -ne $expectedLower) {
+    throw "SHA256 mismatch for $expectedName. Expected $expectedLower, actual $actual."
+  }
+
+  Write-Host "Verified SHA256 for $expectedName."
 }
 
 function Resolve-BuildDirectory {
@@ -214,6 +341,7 @@ if ($UninstallAll) {
   exit 0
 }
 
+Resolve-AgentToken
 Set-InstanceDefaults
 
 if ([string]::IsNullOrWhiteSpace($ServiceName)) {
@@ -255,7 +383,7 @@ if ($Uninstall) {
 }
 
 if ([string]::IsNullOrWhiteSpace($Server) -or [string]::IsNullOrWhiteSpace($Token)) {
-  throw "-Server and -Token are required for install or upgrade."
+  throw "-Server and an agent token are required for install or upgrade."
 }
 
 if ($BinaryPath -ne "" -and ($BinaryUrl -ne "" -or $BuildFromSource)) {
@@ -266,13 +394,20 @@ if ($BinaryUrl -ne "" -and $BuildFromSource) {
   throw "Use only one of -BinaryUrl or -BuildFromSource."
 }
 
+$checksumRequired = $false
+
 if ($BinaryPath -eq "" -and $BinaryUrl -eq "" -and -not $BuildFromSource) {
   $BinaryUrl = Get-DefaultBinaryUrl
+  if ([string]::IsNullOrWhiteSpace($ChecksumUrl)) {
+    $ChecksumUrl = Join-GitHubProxy "$releaseBase/SHA256SUMS"
+  }
+  $checksumRequired = $true
 }
 
 if ($BinaryPath -eq "" -and $BinaryUrl -ne "") {
   $downloadOut = Join-Path $env:TEMP "cf-monitor-agent.exe"
   Invoke-DownloadFile -Url $BinaryUrl -OutFile $downloadOut
+  Test-BinaryChecksum -FilePath $downloadOut -SourceUrl $BinaryUrl -Required $checksumRequired
   $BinaryPath = $downloadOut
 }
 
@@ -299,6 +434,10 @@ if ($BinaryPath -eq "" -and $BuildFromSource) {
 
 if (-not (Test-Path $BinaryPath) -and -not $DryRun) {
   throw "Binary not found: $BinaryPath"
+}
+
+if ($BinaryPath -ne "" -and $BinaryUrl -eq "" -and (-not [string]::IsNullOrWhiteSpace($BinarySha256) -or -not [string]::IsNullOrWhiteSpace($ChecksumUrl))) {
+  Test-BinaryChecksum -FilePath $BinaryPath -SourceUrl $BinaryPath -Required $false
 }
 
 $powerShellPath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"

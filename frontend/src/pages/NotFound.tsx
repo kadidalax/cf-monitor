@@ -1,7 +1,6 @@
-﻿import React from 'react';
 import { Flex, Text, Button, Heading, Box } from '@radix-ui/themes';
 import { Home, Monitor } from 'lucide-react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 
 export default function NotFound() {
   const navigate = useNavigate();

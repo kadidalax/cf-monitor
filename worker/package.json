@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "build": "tsc --noEmit",
+    "test": "vitest run",
     "build:frontend": "npm --prefix ../frontend run build",
     "predeploy": "npm run build:frontend && npm run build",
     "deploy": "wrangler deploy",
@@ -26,6 +27,7 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^4.0.0",
     "typescript": "^5.0.0",
+    "vitest": "^4.0.15",
     "wrangler": "^4.98.0"
   }
 }

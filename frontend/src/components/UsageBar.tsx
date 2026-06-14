@@ -1,4 +1,3 @@
-import React from 'react';
 import { Flex, Text, Box } from '@radix-ui/themes';
 
 interface UsageBarProps {

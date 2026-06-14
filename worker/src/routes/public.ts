@@ -8,7 +8,7 @@ import * as db from '../db/queries';
 import { AdminBootstrapError, ensureInitialAdmin } from '../auth/admin-bootstrap';
 import { AuthConfigurationError, generateToken, verifyAdminToken } from '../auth/jwt';
 import { hashPassword, needsPasswordRehash, verifyPassword } from '../auth/password';
-import { clearAdminSessionCookie, ensureAdminCsrfCookie, getAdminSessionToken, setAdminSessionCookie } from '../auth/session';
+import { clearAdminSessionCookie, ensureAdminCsrfCookie, getAdminSessionToken, setAdminSessionCookie, verifyAdminCsrfToken } from '../auth/session';
 import { PUBLIC_SETTING_KEYS, buildPublicSettings } from '../settings/schema';
 
 const publicRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
@@ -48,6 +48,7 @@ type PublicClientsSnapshot = {
   clients: any[];
   nodes: any[];
   publicClientIds: Set<string>;
+  privacyMode: boolean;
   expiresAt: number;
 };
 
@@ -183,14 +184,23 @@ async function getPublicSettings(database: D1Database): Promise<Record<string, a
   return settings;
 }
 
-async function getPublicClientsSnapshot(database: D1Database): Promise<PublicClientsSnapshot> {
+function isPublicPrivacyModeEnabled(settings: Record<string, any>): boolean {
+  return settings.public_privacy_mode === true || settings.public_privacy_mode === 'true';
+}
+
+async function getPublicClientsSnapshot(database: D1Database, privacyMode = false): Promise<PublicClientsSnapshot> {
   const now = Date.now();
-  if (cacheIsFresh(publicClientsSnapshotCache, now)) return publicClientsSnapshotCache!;
+  if (
+    cacheIsFresh(publicClientsSnapshotCache, now) &&
+    publicClientsSnapshotCache!.privacyMode === privacyMode
+  ) {
+    return publicClientsSnapshotCache!;
+  }
 
   const clients = await db.listPublicClientRows(database);
   const publicClients = clients
     .filter(client => !client.hidden)
-    .map(toPublicClient);
+    .map(client => toPublicClient(client, privacyMode));
   const publicClientIds = new Set(clients.filter(client => !client.hidden).map(client => client.uuid));
   const nodes = publicClients.map((client) => ({
     ...client,
@@ -204,6 +214,7 @@ async function getPublicClientsSnapshot(database: D1Database): Promise<PublicCli
     clients: publicClients,
     nodes,
     publicClientIds,
+    privacyMode,
     expiresAt,
   };
   return publicClientsSnapshotCache;
@@ -274,7 +285,28 @@ function sanitizePublicTags(tags: unknown): string {
     .join(';');
 }
 
-function toPublicClient(client: any): any {
+const PUBLIC_PRIVACY_MODE_FIELDS = [
+  'region',
+  'public_remark',
+  'kernel_version',
+  'version',
+  'price',
+  'billing_cycle',
+  'auto_renewal',
+  'currency',
+  'expired_at',
+  'traffic_limit',
+  'traffic_limit_type',
+];
+
+function applyPublicPrivacyMode(publicClient: any): any {
+  for (const key of PUBLIC_PRIVACY_MODE_FIELDS) {
+    delete publicClient[key];
+  }
+  return publicClient;
+}
+
+function toPublicClient(client: any, privacyMode = false): any {
   const {
     token,
     ipv4,
@@ -282,12 +314,13 @@ function toPublicClient(client: any): any {
     remark,
     ...publicClient
   } = client;
-  return {
+  const result = {
     ...publicClient,
     has_ipv4: Boolean(typeof ipv4 === 'string' ? ipv4.trim() : ipv4),
     has_ipv6: Boolean(typeof ipv6 === 'string' ? ipv6.trim() : ipv6),
     tags: sanitizePublicTags(publicClient.tags),
   };
+  return privacyMode ? applyPublicPrivacyMode(result) : result;
 }
 
 function getAdminBootstrapMessage(error: AdminBootstrapError): string {
@@ -556,7 +589,7 @@ export async function auditLoginFailure(
       ip,
       reason,
     }),
-    'warn',
+    'warning',
   );
 }
 
@@ -618,7 +651,7 @@ publicRoutes.post('/login', async (c) => {
 
   let token: string;
   try {
-    token = await generateToken(user.uuid, user.username, c.env);
+    token = await generateToken(user.uuid, user.username, c.env, Number(user.session_version || 0));
   } catch (error) {
     if (error instanceof AuthConfigurationError) {
       console.error('[auth] JWT_SECRET is missing or shorter than 32 bytes');
@@ -649,6 +682,9 @@ publicRoutes.post('/login', async (c) => {
 
 // 退出登录
 publicRoutes.post('/logout', async (c) => {
+  if (getAdminSessionToken(c) && !verifyAdminCsrfToken(c)) {
+    return c.json({ error: 'CSRF token 无效，请刷新页面后重试' }, 403);
+  }
   clearAdminSessionCookie(c);
   return c.json({ success: true });
 });
@@ -665,10 +701,14 @@ publicRoutes.get('/me', async (c) => {
     if (!payload) {
       return c.json({ error: 'Token 无效' }, 401);
     }
+    const user = await db.getUserByUuid(c.env.DB, payload.userId);
+    if (!user || Number(user.session_version || 0) !== Number(payload.sessionVersion || 0)) {
+      return c.json({ error: 'Token 无效' }, 401);
+    }
     const csrfToken = ensureAdminCsrfCookie(c);
     return c.json({
-      uuid: payload.userId,
-      username: payload.username,
+      uuid: user.uuid,
+      username: user.username,
       csrf_token: csrfToken,
     });
   } catch (error) {
@@ -685,7 +725,8 @@ publicRoutes.get('/clients', async (c) => {
   const limited = await guardPublicMetadata(c, 'clients');
   if (limited) return limited;
 
-  const snapshot = await getPublicClientsSnapshot(c.env.DB);
+  const settings = await getPublicSettings(c.env.DB);
+  const snapshot = await getPublicClientsSnapshot(c.env.DB, isPublicPrivacyModeEnabled(settings));
   setPublicCache(c, PUBLIC_METADATA_CACHE_SECONDS);
   return c.json(snapshot.clients);
 });
@@ -887,8 +928,8 @@ publicRoutes.get('/task/ping', async (c) => {
   const limited = await guardPublicMetadata(c, 'ping-tasks');
   if (limited) return limited;
 
-  const snapshot = await getPublicClientsSnapshot(c.env.DB);
   const settings = await getPublicSettings(c.env.DB);
+  const snapshot = await getPublicClientsSnapshot(c.env.DB, isPublicPrivacyModeEnabled(settings));
   setPublicCache(c, PUBLIC_METADATA_CACHE_SECONDS);
   return c.json(await getPublicPingTasks(c.env.DB, snapshot.publicClientIds, boundedPublicPingIntervalSec(settings)));
 });
@@ -898,7 +939,8 @@ publicRoutes.get('/nodes', async (c) => {
   const limited = await guardPublicMetadata(c, 'nodes');
   if (limited) return limited;
 
-  const snapshot = await getPublicClientsSnapshot(c.env.DB);
+  const settings = await getPublicSettings(c.env.DB);
+  const snapshot = await getPublicClientsSnapshot(c.env.DB, isPublicPrivacyModeEnabled(settings));
   setPublicCache(c, PUBLIC_METADATA_CACHE_SECONDS);
   return c.json(snapshot.nodes);
 });

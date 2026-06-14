@@ -58,6 +58,8 @@ import {
 
 interface AdminClient extends ClientInfo {
   token: string;
+  token_prefix?: string;
+  has_token?: boolean;
   remark: string;
   public_remark: string;
   version: string;
@@ -214,7 +216,12 @@ function SortableRow({ node, selected, onSelect, liveData, onDetail, onEdit, onD
   return (
     <Table.Row ref={setNodeRef} className={`admin-table-row${isDragging ? ' is-dragging' : ''}`} style={rowStyle}>
       <Table.Cell className="admin-node-select-cell">
-        <Flex className="admin-node-select-stack" align="center" justify="center" gap="1">
+        <Flex
+          className="admin-node-select-stack"
+          align="center"
+          justify="center"
+          gap="1"
+        >
           <Tooltip content={dragDisabled ? '切到手动排序后可拖拽' : '拖拽排序'}>
             <button
               type="button"
@@ -224,13 +231,17 @@ function SortableRow({ node, selected, onSelect, liveData, onDetail, onEdit, onD
               {...attributes}
               {...listeners}
             >
-              <GripVertical size={15} />
+              <GripVertical size={14} />
             </button>
           </Tooltip>
-          <Checkbox className="admin-node-checkbox" checked={selected} onCheckedChange={() => onSelect(node.uuid)} />
+          <Checkbox
+            className="admin-node-checkbox"
+            checked={selected}
+            onCheckedChange={() => onSelect(node.uuid)}
+          />
         </Flex>
       </Table.Cell>
-      <Table.Cell>
+      <Table.Cell className="admin-node-name-table-cell">
         <Flex className="admin-node-name-cell" align="center" gap="2">
           <Flag region={node.region} size={18} />
           <Flex direction="column" style={{ minWidth: 0 }}>
@@ -243,14 +254,14 @@ function SortableRow({ node, selected, onSelect, liveData, onDetail, onEdit, onD
           </Flex>
         </Flex>
       </Table.Cell>
-      <Table.Cell>
+      <Table.Cell className="admin-node-ip-cell">
         <Flex className="admin-node-ip-stack" direction="column">
           {node.ipv4 && <CopyableIp value={node.ipv4} />}
           {node.ipv6 && <CopyableIp value={node.ipv6} muted />}
           {!node.ipv4 && !node.ipv6 && <Text size="1" color="gray">-</Text>}
         </Flex>
       </Table.Cell>
-      <Table.Cell>
+      <Table.Cell className="admin-node-version-cell">
         <Flex className="admin-node-version-stack" direction="column" align="start" gap="1">
           <Text
             className="admin-node-version-text"
@@ -271,7 +282,7 @@ function SortableRow({ node, selected, onSelect, liveData, onDetail, onEdit, onD
           </Text>
         </Flex>
       </Table.Cell>
-      <Table.Cell><Text className="admin-node-group-text" size="1" title={node.group}>{node.group || '-'}</Text></Table.Cell>
+      <Table.Cell className="admin-node-group-cell"><Text className="admin-node-group-text" size="1" title={node.group}>{node.group || '-'}</Text></Table.Cell>
       <Table.Cell className="admin-node-billing-cell">
         <PriceTags price={node.price} billing_cycle={node.billing_cycle} expired_at={node.expired_at} currency={node.currency} showTags={false} />
       </Table.Cell>
@@ -313,7 +324,6 @@ function GenerateCommandDialog({ client, open, onOpenChange }: { client: AdminCl
   const cmd = buildAgentInstallCommand({
     platform,
     serverUrl: normalizedServerUrl,
-    token: client.token,
     options: installOptions,
     instanceId: client.uuid,
     nodeName: client.name,
@@ -343,6 +353,8 @@ function GenerateCommandDialog({ client, open, onOpenChange }: { client: AdminCl
             <FieldInput label="安装目录" value={installOptions.dir} onChange={(v) => setOption('dir', v)} placeholder={platform === 'windows' ? 'C:\\Program Files\\CF Monitor' : '/opt/cf-monitor'} />
             <FieldInput label="服务名称" value={installOptions.serviceName} onChange={(v) => setOption('serviceName', v)} placeholder={platform === 'windows' ? 'CFMonitorAgent' : 'cf-monitor-agent'} />
             <FieldInput label="二进制下载地址" value={installOptions.binaryUrl || ''} onChange={(v) => setOption('binaryUrl', v)} placeholder="为空则自动下载预编译二进制" />
+            <FieldInput label="二进制 SHA256" value={installOptions.binarySha256 || ''} onChange={(v) => setOption('binarySha256', v)} placeholder="自定义二进制可填" />
+            <FieldInput label="校验清单地址" value={installOptions.checksumUrl || ''} onChange={(v) => setOption('checksumUrl', v)} placeholder="SHA256SUMS URL" />
             <FieldInput label="磁盘包含" value={installOptions.mountInclude} onChange={(v) => setOption('mountInclude', v)} placeholder="例如 /,/data,/dev/sd*" />
             <FieldInput label="磁盘排除" value={installOptions.mountExclude} onChange={(v) => setOption('mountExclude', v)} placeholder="例如 /boot,tmpfs,/run" />
             <FieldInput label="网卡包含" value={installOptions.nicInclude} onChange={(v) => setOption('nicInclude', v)} placeholder="例如 eth*,ens*" />
@@ -544,7 +556,7 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
         </div>
         <Flex gap="3" justify="end" mt="4">
           <Button variant="soft" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button onClick={handleSave} disabled={saving}>{saving ? '保存中...' : '保存'}</Button>
+          <Button onClick={handleSave} disabled={saving}>{saving ? '保存中…' : '保存'}</Button>
         </Flex>
       </Dialog.Content>
     </Dialog.Root>
@@ -554,13 +566,24 @@ function EditDialog({ client, open, onOpenChange, onSaved }: { client: AdminClie
 function AddDialog({ open, onOpenChange, onSaved }: { open: boolean; onOpenChange: (v: boolean) => void; onSaved: () => void }) {
   const apiFetch = useApi();
   const [name, setName] = useState('');
+  const [createdToken, setCreatedToken] = useState('');
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (open) setCreatedToken('');
+  }, [open]);
 
   const handleAdd = async () => {
     setLoading(true);
     try {
       const result = await apiFetch('/admin/clients/add', { method: 'POST', body: JSON.stringify({ name }) });
-      if (result.success || result.uuid) { toast.success('添加成功'); setName(''); onOpenChange(false); onSaved(); }
+      if (result.success || result.uuid) {
+        const token = typeof result.token === 'string' ? result.token : '';
+        setCreatedToken(token);
+        toast.success('添加成功');
+        setName('');
+        onSaved();
+      }
       else toast.error(result.error || '添加失败');
     } catch (e: unknown) {
       toast.error(e instanceof Error ? e.message : '添加失败');
@@ -575,11 +598,23 @@ function AddDialog({ open, onOpenChange, onSaved }: { open: boolean; onOpenChang
         <Dialog.Title>添加服务器</Dialog.Title>
         <Flex direction="column" gap="3" mt="2">
           <FieldInput label="服务器名称" value={name} onChange={setName} placeholder="可选，创建后可修改" />
-          <Text size="1" color="gray">创建后将生成 Token，用于 Agent 连接</Text>
+          {createdToken ? (
+            <Flex align="end" gap="2">
+              <label style={{ flex: 1 }}>
+                <Text size="2" weight="bold" style={{ display: 'block', marginBottom: 4 }}>一次性 Agent Token</Text>
+                <TextField.Root style={{ width: '100%' }} value={createdToken} type="password" readOnly />
+              </label>
+              <Button variant="soft" onClick={() => copyToClipboard(createdToken, 'Token 已复制')}>
+                <Copy size={14} /> 复制
+              </Button>
+            </Flex>
+          ) : (
+            <Text size="1" color="gray">创建后将生成 Token，用于 Agent 连接</Text>
+          )}
         </Flex>
         <Flex gap="3" justify="end" mt="4">
-          <Button variant="soft" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button onClick={handleAdd} disabled={loading}>{loading ? '创建中...' : '创建'}</Button>
+          <Button variant="soft" onClick={() => onOpenChange(false)}>{createdToken ? '关闭' : '取消'}</Button>
+          {!createdToken && <Button onClick={handleAdd} disabled={loading}>{loading ? '创建中…' : '创建'}</Button>}
         </Flex>
       </Dialog.Content>
     </Dialog.Root>
@@ -611,7 +646,7 @@ function DeleteDialog({ client, open, onOpenChange, onDeleted }: { client: Admin
         <Text size="2">确定要删除服务器 <strong>{client?.name}</strong> 吗？此操作不可撤销。</Text>
         <Flex gap="3" justify="end" mt="4">
           <Button variant="soft" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button color="red" onClick={handleDelete} disabled={deleting}>{deleting ? '删除中...' : '确认删除'}</Button>
+          <Button color="red" onClick={handleDelete} disabled={deleting}>{deleting ? '删除中…' : '确认删除'}</Button>
         </Flex>
       </Dialog.Content>
     </Dialog.Root>
@@ -621,15 +656,26 @@ function DeleteDialog({ client, open, onOpenChange, onDeleted }: { client: Admin
 function RotateTokenDialog({ client, open, onOpenChange, onRotated }: { client: AdminClient | null; open: boolean; onOpenChange: (v: boolean) => void; onRotated: () => void }) {
   const apiFetch = useApi();
   const [rotating, setRotating] = useState(false);
+  const [newToken, setNewToken] = useState('');
+
+  useEffect(() => {
+    if (open) setNewToken('');
+  }, [open]);
 
   const handleRotate = async () => {
     if (!client) return;
+    const reauthPassword = window.prompt('请输入当前管理员密码以重置 Token');
+    if (!reauthPassword) return;
     setRotating(true);
     try {
-      const result = await apiFetch('/admin/clients/' + client.uuid + '/token/rotate', { method: 'POST' });
+      const result = await apiFetch('/admin/clients/' + client.uuid + '/token/rotate', {
+        method: 'POST',
+        body: JSON.stringify({ reauth_password: reauthPassword }),
+      });
       if (result.success) {
-        toast.success('Token 已重置，请重新复制安装命令');
-        onOpenChange(false);
+        const token = typeof result.token === 'string' ? result.token : '';
+        setNewToken(token);
+        toast.success('Token 已重置');
         onRotated();
       } else {
         toast.error(result.error || '重置 Token 失败');
@@ -648,10 +694,21 @@ function RotateTokenDialog({ client, open, onOpenChange, onRotated }: { client: 
         <Flex direction="column" gap="2">
           <Text size="2">确定要重置 <strong>{client?.name}</strong> 的 Agent Token 吗？</Text>
           <Text size="2" color="gray">旧 Agent 会立刻无法继续上报，需要用新的安装命令或配置重新启动。</Text>
+          {newToken && (
+            <Flex align="end" gap="2" mt="2">
+              <label style={{ flex: 1 }}>
+                <Text size="2" weight="bold" style={{ display: 'block', marginBottom: 4 }}>一次性 Agent Token</Text>
+                <TextField.Root style={{ width: '100%' }} value={newToken} type="password" readOnly />
+              </label>
+              <Button variant="soft" onClick={() => copyToClipboard(newToken, 'Token 已复制')}>
+                <Copy size={14} /> 复制
+              </Button>
+            </Flex>
+          )}
         </Flex>
         <Flex gap="3" justify="end" mt="4">
-          <Button variant="soft" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button color="red" onClick={handleRotate} disabled={rotating}>{rotating ? '重置中...' : '确认重置'}</Button>
+          <Button variant="soft" onClick={() => onOpenChange(false)}>{newToken ? '关闭' : '取消'}</Button>
+          {!newToken && <Button color="red" onClick={handleRotate} disabled={rotating}>{rotating ? '重置中…' : '确认重置'}</Button>}
         </Flex>
       </Dialog.Content>
     </Dialog.Root>
@@ -755,7 +812,7 @@ export default function AdminDashboard() {
 
   useEffect(() => { loadClients(); }, [loadClients]);
   useEffect(() => {
-    const iv = setInterval(loadClients, 10000);
+    const iv = setInterval(loadClients, 60000); // 降低轮询频率到 60 秒，减少 D1 读取
     return () => clearInterval(iv);
   }, [loadClients]);
 
@@ -859,27 +916,24 @@ export default function AdminDashboard() {
 
       <Card className="admin-filter-card">
         <Flex className="admin-filter-toolbar" gap="2" align="center">
-          <SegmentedControl.Root value={statusFilter} onValueChange={(value) => setStatusFilter(value as NodeStatusFilter)} size="1">
+          <SegmentedControl.Root className="admin-status-filter" value={statusFilter} onValueChange={(value) => setStatusFilter(value as NodeStatusFilter)} size="1">
             <SegmentedControl.Item value="all">全部</SegmentedControl.Item>
             <SegmentedControl.Item value="online">在线</SegmentedControl.Item>
             <SegmentedControl.Item value="offline">离线</SegmentedControl.Item>
           </SegmentedControl.Root>
-          <SegmentedControl.Root value={sortKey} onValueChange={(value) => setSortKey(value as AdminSortKey)} size="1">
+          <SegmentedControl.Root className="admin-sort-filter" value={sortKey} onValueChange={(value) => setSortKey(value as AdminSortKey)} size="1">
             <SegmentedControl.Item value="manual">手动</SegmentedControl.Item>
             <SegmentedControl.Item value="name">名称</SegmentedControl.Item>
             <SegmentedControl.Item value="status">状态</SegmentedControl.Item>
           </SegmentedControl.Root>
-          <Button variant="soft" size="1" disabled={sortKey === 'manual'} onClick={() => setSortDir((value) => value === 'asc' ? 'desc' : 'asc')}>
+          <Button className="admin-sort-dir-button" variant="soft" size="1" disabled={sortKey === 'manual'} onClick={() => setSortDir((value) => value === 'asc' ? 'desc' : 'asc')}>
             {sortDir === 'asc' ? '升序' : '降序'}
           </Button>
           <Flex className="admin-search-cluster" gap="2" align="center">
             <TextField.Root className="admin-server-search" placeholder="查找服务器" value={search} onChange={e => setSearch(e.target.value)}>
               <TextField.Slot><Search size={14} /></TextField.Slot>
             </TextField.Root>
-            <IconButton variant="soft" size="1" onClick={() => { loadClients(); refreshLive(); }} title="刷新"><RefreshCw size={14} /></IconButton>
-          </Flex>
-
-          <Flex className="admin-filter-right" gap="3" align="center">
+            <IconButton variant="soft" size="1" onClick={() => { loadClients(); refreshLive(); }} aria-label="刷新" title="刷新"><RefreshCw size={14} /></IconButton>
             {selectedNodes.length > 0 && (
               <Flex className="admin-selection-inline" gap="2" align="center">
                 <Badge variant="soft" color="blue">已选 {selectedNodes.length}</Badge>
@@ -895,7 +949,9 @@ export default function AdminDashboard() {
                 <Button variant="ghost" size="1" onClick={() => setSelectedNodes([])}>清除</Button>
               </Flex>
             )}
+          </Flex>
 
+          <Flex className="admin-filter-right" gap="3" align="center">
             <Select.Root value={selectedGroup} onValueChange={setSelectedGroup}>
               <Select.Trigger className="admin-filter-group-select" aria-label="分组筛选" />
               <Select.Content>
@@ -905,7 +961,7 @@ export default function AdminDashboard() {
                 ))}
               </Select.Content>
             </Select.Root>
-            <Button onClick={() => setAddOpen(true)}><Plus size={16} /> 添加服务器</Button>
+            <Button className="admin-add-server-button" onClick={() => setAddOpen(true)}><Plus size={16} /> 添加服务器</Button>
           </Flex>
         </Flex>
       </Card>

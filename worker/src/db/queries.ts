@@ -1,8 +1,15 @@
 ﻿/**
  * D1 数据库查询辅助函数 */
 
-import type { Bindings } from '../index';
 import type { BackupData } from '../utils/backup';
+import {
+  hashAgentToken,
+  isTokenHash,
+  prepareAgentTokenForStorage,
+  readStoredTokenHash,
+  storedTokenHash,
+  tokenPrefix,
+} from '../utils/agent-token';
 
 // ============ 客户端 (Clients) ============
 
@@ -36,19 +43,25 @@ export interface Client {
   hidden: boolean;
   traffic_limit: number;
   traffic_limit_type: string;
+  token_hash: string | null;
+  token_prefix: string | null;
+  last_seen_at: string | null;
+  last_report_source: string;
+  last_report_persisted_at: string | null;
+  last_report_interval_sec: number | null;
   sort_order?: number;
   created_at: string;
   updated_at: string;
 }
 
-export type PublicClientRow = Omit<Client, 'token' | 'remark'> & {
+export type PublicClientRow = Omit<Client, 'token' | 'token_hash' | 'token_prefix' | 'remark' | 'last_seen_at' | 'last_report_source' | 'last_report_persisted_at' | 'last_report_interval_sec'> & {
   ipv4: string;
   ipv6: string;
 };
 
-export type ScheduledClientRow = Pick<Client, 'uuid' | 'name' | 'created_at' | 'expired_at'>;
-export type ClientTokenMeta = Pick<Client, 'uuid' | 'token' | 'name'>;
-export type ClientIdentity = Pick<Client, 'uuid' | 'token' | 'name' | 'hidden'>;
+export type ScheduledClientRow = Pick<Client, 'uuid' | 'name' | 'created_at' | 'expired_at' | 'last_seen_at' | 'last_report_interval_sec'>;
+export type ClientTokenMeta = Pick<Client, 'uuid' | 'token' | 'token_hash' | 'token_prefix' | 'name'>;
+export type ClientIdentity = Pick<Client, 'uuid' | 'token' | 'token_hash' | 'token_prefix' | 'name' | 'hidden'>;
 
 export interface ClientVisibility {
   uuid: string;
@@ -65,7 +78,7 @@ export async function clientExists(db: D1Database, uuid: string): Promise<boolea
 }
 
 export async function getClientTokenMeta(db: D1Database, uuid: string): Promise<ClientTokenMeta | null> {
-  return db.prepare('SELECT uuid, token, name FROM clients WHERE uuid = ?').bind(uuid).first<ClientTokenMeta>();
+  return db.prepare('SELECT uuid, token, token_hash, token_prefix, name FROM clients WHERE uuid = ?').bind(uuid).first<ClientTokenMeta>();
 }
 
 function normalizeUuidList(uuids: string[]): string[] {
@@ -97,15 +110,74 @@ export async function getClientsByIds(db: D1Database, uuids: string[]): Promise<
 }
 
 export async function getClientByToken(db: D1Database, token: string): Promise<Client | null> {
-  return db.prepare('SELECT * FROM clients WHERE token = ?').bind(token).first<Client>();
+  const tokenHash = await hashAgentToken(token);
+  const hashedClient = await db.prepare(`
+    SELECT * FROM clients
+    WHERE token_hash = ?
+  `)
+    .bind(tokenHash)
+    .first<Client>();
+  const client = hashedClient || await db.prepare(`
+    SELECT * FROM clients
+    WHERE (token_hash IS NULL OR token_hash = '') AND token = ?
+  `)
+    .bind(token)
+    .first<Client>();
+  if (client && (!client.token_hash || client.token !== storedTokenHash(tokenHash))) {
+    await storeClientTokenHash(db, client.uuid, token, tokenHash);
+    return {
+      ...client,
+      token: storedTokenHash(tokenHash),
+      token_hash: tokenHash,
+      token_prefix: tokenPrefix(token),
+    };
+  }
+  return client;
 }
 
 export async function getClientIdentityByToken(db: D1Database, token: string): Promise<ClientIdentity | null> {
-  return db.prepare('SELECT uuid, token, name, hidden FROM clients WHERE token = ?').bind(token).first<ClientIdentity>();
+  const tokenHash = await hashAgentToken(token);
+  const hashedClient = await db.prepare(`
+    SELECT uuid, token, token_hash, token_prefix, name, hidden FROM clients
+    WHERE token_hash = ?
+  `)
+    .bind(tokenHash)
+    .first<ClientIdentity>();
+  const client = hashedClient || await db.prepare(`
+    SELECT uuid, token, token_hash, token_prefix, name, hidden FROM clients
+    WHERE (token_hash IS NULL OR token_hash = '') AND token = ?
+  `)
+    .bind(token)
+    .first<ClientIdentity>();
+  if (client && (!client.token_hash || client.token !== storedTokenHash(tokenHash))) {
+    await storeClientTokenHash(db, client.uuid, token, tokenHash);
+    return {
+      ...client,
+      token: storedTokenHash(tokenHash),
+      token_hash: tokenHash,
+      token_prefix: tokenPrefix(token),
+    };
+  }
+  return client;
 }
 
 export async function clientTokenExists(db: D1Database, token: string): Promise<boolean> {
-  const row = await db.prepare('SELECT 1 AS found FROM clients WHERE token = ? LIMIT 1').bind(token).first<{ found: number }>();
+  const tokenHash = await hashAgentToken(token);
+  const hashedRow = await db.prepare(`
+    SELECT 1 AS found FROM clients
+    WHERE token_hash = ?
+    LIMIT 1
+  `)
+    .bind(tokenHash)
+    .first<{ found: number }>();
+  if (hashedRow) return true;
+  const row = await db.prepare(`
+    SELECT 1 AS found FROM clients
+    WHERE (token_hash IS NULL OR token_hash = '') AND token = ?
+    LIMIT 1
+  `)
+    .bind(token)
+    .first<{ found: number }>();
   return Boolean(row);
 }
 
@@ -157,7 +229,7 @@ export async function getClientVisibility(db: D1Database, uuid: string): Promise
 
 export async function listScheduledClientRows(db: D1Database): Promise<ScheduledClientRow[]> {
   const result = await db.prepare(
-    'SELECT uuid, name, created_at, expired_at FROM clients ORDER BY sort_order ASC, name COLLATE NOCASE ASC, created_at ASC',
+    'SELECT uuid, name, created_at, expired_at, last_seen_at, last_report_interval_sec FROM clients ORDER BY sort_order ASC, name COLLATE NOCASE ASC, created_at ASC',
   ).all<ScheduledClientRow>();
   return result.results;
 }
@@ -170,7 +242,7 @@ export async function getScheduledClientRowsByIds(db: D1Database, uuids: string[
   for (let index = 0; index < uniqueUuids.length; index += D1_BATCH_CHUNK_SIZE) {
     const chunk = uniqueUuids.slice(index, index + D1_BATCH_CHUNK_SIZE);
     const result = await db.prepare(
-      `SELECT uuid, name, created_at, expired_at FROM clients WHERE uuid IN (${placeholders(chunk.length)})`,
+      `SELECT uuid, name, created_at, expired_at, last_seen_at, last_report_interval_sec FROM clients WHERE uuid IN (${placeholders(chunk.length)})`,
     ).bind(...chunk).all<ScheduledClientRow>();
     clients.push(...result.results);
   }
@@ -182,31 +254,82 @@ export async function listClientIds(db: D1Database): Promise<string[]> {
   return result.results.map(row => row.uuid);
 }
 
+async function storeClientTokenHash(db: D1Database, uuid: string, rawToken: string, knownHash?: string): Promise<{
+  storedToken: string;
+  tokenHash: string;
+  tokenPrefix: string;
+}> {
+  const tokenHash = knownHash || await hashAgentToken(rawToken);
+  const prepared = {
+    storedToken: storedTokenHash(tokenHash),
+    tokenHash,
+    tokenPrefix: tokenPrefix(rawToken),
+  };
+  await db.prepare(`
+    UPDATE clients
+    SET token = ?,
+        token_hash = ?,
+        token_prefix = ?,
+        updated_at = datetime('now')
+    WHERE uuid = ?
+  `).bind(prepared.storedToken, prepared.tokenHash, prepared.tokenPrefix, uuid).run();
+  return prepared;
+}
+
+async function normalizeClientTokenForStorage(client: Partial<Client>): Promise<{
+  storedToken: string;
+  tokenHash: string;
+  tokenPrefix: string;
+}> {
+  const explicitHash = isTokenHash(client.token_hash) ? client.token_hash : readStoredTokenHash(client.token);
+  if (explicitHash) {
+    return {
+      storedToken: storedTokenHash(explicitHash),
+      tokenHash: explicitHash,
+      tokenPrefix: typeof client.token_prefix === 'string' ? client.token_prefix.slice(0, 8) : '',
+    };
+  }
+
+  const rawToken = typeof client.token === 'string' && client.token.trim() !== ''
+    ? client.token.trim()
+    : crypto.randomUUID();
+  return prepareAgentTokenForStorage(rawToken);
+}
+
 export async function createClient(db: D1Database, client: Partial<Client>): Promise<void> {
   const maxOrder = await db.prepare('SELECT COALESCE(MAX(sort_order), 0) AS max_order FROM clients').first<{ max_order: number }>();
   const sortOrder = client.sort_order && client.sort_order > 0 ? client.sort_order : Number(maxOrder?.max_order || 0) + 1;
-  await db.prepare(`INSERT INTO clients (uuid, token, name, sort_order) VALUES (?, ?, ?, ?)`)
-    .bind(client.uuid, client.token, client.name || '', sortOrder).run();
+  const token = await normalizeClientTokenForStorage(client);
+  await db.prepare(`INSERT INTO clients (uuid, token, token_hash, token_prefix, name, sort_order) VALUES (?, ?, ?, ?, ?, ?)`)
+    .bind(client.uuid, token.storedToken, token.tokenHash, token.tokenPrefix, client.name || '', sortOrder).run();
 }
 
 export async function replaceAllClients(db: D1Database, clients: Partial<Client>[]): Promise<void> {
-  await db.prepare('DELETE FROM clients').run();
-  if (clients.length === 0) return;
+  // Atomic delete+insert: DELETE must be in the same batch to prevent data loss if batch fails
+  const batch: D1PreparedStatement[] = [db.prepare('DELETE FROM clients')];
+
+  if (clients.length === 0) {
+    await db.batch(batch);
+    return;
+  }
 
   const stmt = db.prepare(`
     INSERT INTO clients (
-      uuid, token, name, cpu_name, virtualization, arch, cpu_cores, os,
+      uuid, token, token_hash, token_prefix, name, cpu_name, virtualization, arch, cpu_cores, os,
       kernel_version, gpu_name, ipv4, ipv6, region, remark, public_remark,
       mem_total, swap_total, disk_total, version, price, billing_cycle,
       auto_renewal, currency, expired_at, "group", tags, hidden, traffic_limit,
-      traffic_limit_type, sort_order, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      traffic_limit_type, sort_order, last_report_interval_sec, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
-  const batch = clients.map((client, index) =>
-    stmt.bind(
+  for (const [index, client] of clients.entries()) {
+    const token = await normalizeClientTokenForStorage(client);
+    batch.push(stmt.bind(
       client.uuid || crypto.randomUUID(),
-      client.token || crypto.randomUUID(),
+      token.storedToken,
+      token.tokenHash,
+      token.tokenPrefix,
       client.name || '',
       client.cpu_name || '',
       client.virtualization || '',
@@ -235,10 +358,11 @@ export async function replaceAllClients(db: D1Database, clients: Partial<Client>
       client.traffic_limit || 0,
       client.traffic_limit_type || 'max',
       client.sort_order || index + 1,
+      client.last_report_interval_sec || null,
       client.created_at || new Date().toISOString(),
       client.updated_at || new Date().toISOString(),
-    ),
-  );
+    ));
+  }
 
   await db.batch(batch);
 }
@@ -315,8 +439,59 @@ export async function updateClient(db: D1Database, uuid: string, data: Partial<C
 }
 
 export async function rotateClientToken(db: D1Database, uuid: string, token: string): Promise<void> {
-  await db.prepare('UPDATE clients SET token = ?, updated_at = datetime(\'now\') WHERE uuid = ?')
-    .bind(token, uuid).run();
+  await storeClientTokenHash(db, uuid, token);
+}
+
+export async function markClientSeen(
+  db: D1Database,
+  uuid: string,
+  time: string,
+  source: string,
+  persistedAt?: string | null,
+  reportIntervalSec?: number | null,
+): Promise<void> {
+  const safeSource = source.slice(0, 32);
+  const safeReportIntervalSec = Number.isFinite(Number(reportIntervalSec))
+    ? Math.min(3600, Math.max(1, Math.floor(Number(reportIntervalSec))))
+    : null;
+  // Monotonic guard: only update if new timestamp is greater than or equal to existing
+  // This prevents out-of-order/replayed reports from moving last_seen_at backwards
+  if (persistedAt) {
+    await db.prepare(`
+      UPDATE clients
+      SET last_seen_at = CASE
+            WHEN last_seen_at IS NULL OR ? >= last_seen_at THEN ?
+            ELSE last_seen_at
+          END,
+          last_report_source = ?,
+          last_report_persisted_at = CASE
+            WHEN last_report_persisted_at IS NULL OR ? >= COALESCE(last_report_persisted_at, '') THEN ?
+            ELSE last_report_persisted_at
+          END,
+          last_report_interval_sec = CASE
+            WHEN ? IS NOT NULL AND (last_seen_at IS NULL OR ? >= last_seen_at) THEN ?
+            ELSE last_report_interval_sec
+          END,
+          updated_at = datetime('now')
+      WHERE uuid = ?
+    `).bind(time, time, safeSource, persistedAt, persistedAt, safeReportIntervalSec, time, safeReportIntervalSec, uuid).run();
+    return;
+  }
+
+  await db.prepare(`
+    UPDATE clients
+    SET last_seen_at = CASE
+          WHEN last_seen_at IS NULL OR ? >= last_seen_at THEN ?
+          ELSE last_seen_at
+        END,
+        last_report_source = ?,
+        last_report_interval_sec = CASE
+          WHEN ? IS NOT NULL AND (last_seen_at IS NULL OR ? >= last_seen_at) THEN ?
+          ELSE last_report_interval_sec
+        END,
+        updated_at = datetime('now')
+    WHERE uuid = ?
+  `).bind(time, time, safeSource, safeReportIntervalSec, time, safeReportIntervalSec, uuid).run();
 }
 
 export async function deleteClient(db: D1Database, uuid: string): Promise<void> {
@@ -429,16 +604,6 @@ function normalizePagination(page: number = 1, limit: number = 100, maxLimit: nu
     page: safePage,
     limit: safeLimit,
     offset: (safePage - 1) * safeLimit,
-  };
-}
-
-function makePagedResult<T>(data: T[], total: number, page: number, limit: number): PagedResult<T> {
-  return {
-    data,
-    total,
-    page,
-    limit,
-    has_more: page * limit < total,
   };
 }
 
@@ -907,6 +1072,7 @@ export interface User {
   uuid: string;
   username: string;
   passwd: string;
+  session_version: number;
   created_at: string;
   updated_at: string;
 }
@@ -952,6 +1118,19 @@ export async function updateUserUsername(db: D1Database, uuid: string, username:
 export async function updateUserPassword(db: D1Database, uuid: string, hashedPassword: string): Promise<void> {
   await db.prepare("UPDATE users SET passwd = ?, updated_at = datetime('now') WHERE uuid = ?")
     .bind(hashedPassword, uuid).run();
+}
+
+export async function rotateUserSessionVersion(db: D1Database, uuid: string): Promise<number> {
+  await db.prepare(`
+    UPDATE users
+    SET session_version = COALESCE(session_version, 0) + 1,
+        updated_at = datetime('now')
+    WHERE uuid = ?
+  `).bind(uuid).run();
+  const row = await db.prepare('SELECT session_version FROM users WHERE uuid = ?')
+    .bind(uuid)
+    .first<{ session_version: number }>();
+  return Number(row?.session_version || 0);
 }
 
 // ============ 登录限速 ============
@@ -1026,12 +1205,18 @@ export async function setSetting(db: D1Database, key: string, value: string): Pr
 }
 
 export async function replaceAllSettings(db: D1Database, settings: Record<string, string>): Promise<void> {
-  await db.prepare('DELETE FROM settings').run();
+  // Atomic delete+insert: DELETE must be in the same batch to prevent data loss if batch fails
+  const batch: D1PreparedStatement[] = [db.prepare('DELETE FROM settings')];
   const entries = Object.entries(settings);
-  if (entries.length === 0) return;
+
+  if (entries.length === 0) {
+    await db.batch(batch);
+    return;
+  }
 
   const stmt = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)');
-  await db.batch(entries.map(([key, value]) => stmt.bind(key, value)));
+  batch.push(...entries.map(([key, value]) => stmt.bind(key, value)));
+  await db.batch(batch);
 }
 
 export async function getAllSettings(db: D1Database): Promise<Record<string, string>> {
@@ -1059,9 +1244,21 @@ export interface PingTask {
 export type PingTaskEstimateRow = Pick<PingTask, 'id' | 'name' | 'clients' | 'all_clients' | 'interval_sec'>;
 
 function normalizePingTask(row: any): PingTask {
+  let clients: string[] = [];
+  try {
+    clients = JSON.parse(row.clients || '[]');
+    if (!Array.isArray(clients)) {
+      console.error('[normalizePingTask] clients is not an array:', row.clients);
+      clients = [];
+    }
+  } catch (error) {
+    console.error('[normalizePingTask] JSON.parse failed for clients:', row.clients, error);
+    clients = [];
+  }
+
   return {
     ...row,
-    clients: JSON.parse(row.clients || '[]'),
+    clients,
     all_clients: !!row.all_clients,
     sort_order: Number(row.sort_order ?? row.id ?? 0),
   };
@@ -1082,13 +1279,27 @@ export async function listPingTaskEstimateRows(db: D1Database): Promise<PingTask
   const result = await db.prepare(
     'SELECT id, name, clients, all_clients, interval_sec FROM ping_tasks ORDER BY sort_order ASC, id ASC',
   ).all<any>();
-  return result.results.map(row => ({
-    id: row.id,
-    name: row.name,
-    clients: JSON.parse(row.clients || '[]'),
-    all_clients: !!row.all_clients,
-    interval_sec: Number(row.interval_sec || 60),
-  }));
+  return result.results.map(row => {
+    let clients: string[] = [];
+    try {
+      clients = JSON.parse(row.clients || '[]');
+      if (!Array.isArray(clients)) {
+        console.error('[listPingTaskEstimateRows] clients is not an array:', row.clients);
+        clients = [];
+      }
+    } catch (error) {
+      console.error('[listPingTaskEstimateRows] JSON.parse failed for clients:', row.clients, error);
+      clients = [];
+    }
+
+    return {
+      id: row.id,
+      name: row.name,
+      clients,
+      all_clients: !!row.all_clients,
+      interval_sec: Number(row.interval_sec || 60),
+    };
+  });
 }
 
 export async function createPingTask(db: D1Database, task: PingTask): Promise<void> {
@@ -1099,15 +1310,20 @@ export async function createPingTask(db: D1Database, task: PingTask): Promise<vo
 }
 
 export async function replaceAllPingTasks(db: D1Database, tasks: PingTask[]): Promise<void> {
-  await db.prepare('DELETE FROM ping_tasks').run();
-  if (tasks.length === 0) return;
+  // Atomic delete+insert: DELETE must be in the same batch to prevent data loss if batch fails
+  const batch: D1PreparedStatement[] = [db.prepare('DELETE FROM ping_tasks')];
+
+  if (tasks.length === 0) {
+    await db.batch(batch);
+    return;
+  }
 
   const stmt = db.prepare(`
     INSERT INTO ping_tasks (id, name, clients, all_clients, type, target, interval_sec, sort_order)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
-  await db.batch(tasks.map((task) =>
+  batch.push(...tasks.map((task) =>
     stmt.bind(
       task.id || null,
       task.name || '',
@@ -1119,6 +1335,8 @@ export async function replaceAllPingTasks(db: D1Database, tasks: PingTask[]): Pr
       task.sort_order || task.id || 0,
     ),
   ));
+
+  await db.batch(batch);
 }
 
 const PING_TASK_UPDATE_COLUMNS: Record<string, string> = {
@@ -1443,6 +1661,48 @@ export async function getPingRecordsPaged(
 
 // ============ 通知设置 ============
 
+export type NotificationDeliveryStatus = 'sent' | 'failed' | 'skipped';
+export type NotificationIncidentStatus = 'open' | 'resolved';
+
+export interface NotificationDeliveryInput {
+  notification_type: string;
+  channel?: string;
+  status: NotificationDeliveryStatus;
+  target?: string | null;
+  client?: string | null;
+  rule_id?: number | null;
+  attempted_at: string;
+  sent_at?: string | null;
+  error?: unknown;
+}
+
+export interface NotificationIncidentRow {
+  id: number;
+  incident_key: string;
+  notification_type: string;
+  target: string;
+  client: string | null;
+  rule_id: number | null;
+  status: NotificationIncidentStatus;
+  first_detected_at: string;
+  last_detected_at: string;
+  resolved_at: string | null;
+  last_attempt_at: string | null;
+  last_sent_at: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NotificationIncidentInput {
+  incident_key?: string | null;
+  notification_type: string;
+  target: string;
+  client?: string | null;
+  rule_id?: number | null;
+  detected_at: string;
+}
+
 export async function getOfflineNotification(db: D1Database, client: string): Promise<any> {
   return db.prepare('SELECT * FROM offline_notifications WHERE client = ?').bind(client).first();
 }
@@ -1453,16 +1713,21 @@ export async function listOfflineNotifications(db: D1Database): Promise<any[]> {
 }
 
 export async function replaceAllOfflineNotifications(db: D1Database, notifications: any[]): Promise<void> {
-  await db.prepare('DELETE FROM offline_notifications').run();
-  if (notifications.length === 0) return;
+  // Atomic delete+insert: DELETE must be in the same batch to prevent data loss if batch fails
+  const batch: D1PreparedStatement[] = [db.prepare('DELETE FROM offline_notifications')];
+
+  if (notifications.length === 0) {
+    await db.batch(batch);
+    return;
+  }
 
   const stmt = db.prepare(`
     INSERT INTO offline_notifications (client, enable, grace_period, last_notified)
     VALUES (?, ?, ?, ?)
   `);
 
-  await db.batch(
-    notifications.map((item) =>
+  batch.push(
+    ...notifications.map((item) =>
       stmt.bind(
         item.client,
         item.enable ? 1 : 0,
@@ -1471,6 +1736,8 @@ export async function replaceAllOfflineNotifications(db: D1Database, notificatio
       ),
     ),
   );
+
+  await db.batch(batch);
 }
 
 export async function setOfflineNotification(db: D1Database, client: string, enable: boolean, gracePeriod: number): Promise<boolean> {
@@ -1486,9 +1753,256 @@ export async function setOfflineNotification(db: D1Database, client: string, ena
   return Number(result.meta.changes || 0) > 0;
 }
 
+function truncateNotificationError(error: unknown): string | null {
+  if (error === null || error === undefined) return null;
+  return String(error).replace(/[\r\n\t]+/g, ' ').slice(0, 500);
+}
+
+function normalizeNotificationDeliveryText(value: unknown, fallback: string, maxLength: number): string {
+  if (typeof value !== 'string') return fallback;
+  const trimmed = value.trim();
+  return (trimmed || fallback).slice(0, maxLength);
+}
+
+export async function insertNotificationDelivery(db: D1Database, delivery: NotificationDeliveryInput): Promise<void> {
+  const ruleId = Number.isInteger(delivery.rule_id) ? Number(delivery.rule_id) : null;
+  const client = typeof delivery.client === 'string' && delivery.client.trim()
+    ? delivery.client.trim().slice(0, 128)
+    : null;
+  const target = normalizeNotificationDeliveryText(
+    delivery.target,
+    client || (ruleId === null ? '' : String(ruleId)),
+    128,
+  );
+
+  await db.prepare(`
+    INSERT INTO notification_deliveries (
+      notification_type,
+      channel,
+      status,
+      target,
+      client,
+      rule_id,
+      attempted_at,
+      sent_at,
+      error
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `)
+    .bind(
+      normalizeNotificationDeliveryText(delivery.notification_type, 'unknown', 64),
+      normalizeNotificationDeliveryText(delivery.channel, 'telegram', 32),
+      delivery.status,
+      target,
+      client,
+      ruleId,
+      delivery.attempted_at || new Date().toISOString(),
+      delivery.sent_at || null,
+      truncateNotificationError(delivery.error),
+    )
+    .run();
+}
+
+export function makeNotificationIncidentKey(notificationType: string, target: string): string {
+  const safeType = normalizeNotificationDeliveryText(notificationType, 'unknown', 64);
+  const safeTarget = normalizeNotificationDeliveryText(target, '', 192);
+  return `${safeType}:${safeTarget}`.slice(0, 256);
+}
+
+export async function listOpenNotificationIncidents(
+  db: D1Database,
+  notificationType: string,
+  targets: string[],
+): Promise<Map<string, NotificationIncidentRow>> {
+  const incidents = new Map<string, NotificationIncidentRow>();
+  const safeType = normalizeNotificationDeliveryText(notificationType, 'unknown', 64);
+  const uniqueTargets = [...new Set(
+    targets
+      .filter((target): target is string => typeof target === 'string')
+      .map(target => target.trim())
+      .filter(Boolean)
+      .map(target => target.slice(0, 192)),
+  )];
+  if (uniqueTargets.length === 0) return incidents;
+
+  for (let index = 0; index < uniqueTargets.length; index += D1_BATCH_CHUNK_SIZE) {
+    const chunk = uniqueTargets.slice(index, index + D1_BATCH_CHUNK_SIZE);
+    const result = await db.prepare(`
+      SELECT *
+      FROM notification_incidents
+      WHERE notification_type = ?
+        AND status = 'open'
+        AND target IN (${placeholders(chunk.length)})
+    `)
+      .bind(safeType, ...chunk)
+      .all<NotificationIncidentRow>();
+
+    for (const row of result.results || []) {
+      incidents.set(row.target, row);
+    }
+  }
+
+  return incidents;
+}
+
+export async function openNotificationIncident(db: D1Database, incident: NotificationIncidentInput): Promise<string> {
+  const notificationType = normalizeNotificationDeliveryText(incident.notification_type, 'unknown', 64);
+  const target = normalizeNotificationDeliveryText(incident.target, '', 192);
+  const incidentKey = normalizeNotificationDeliveryText(
+    incident.incident_key,
+    makeNotificationIncidentKey(notificationType, target),
+    256,
+  );
+  const client = typeof incident.client === 'string' && incident.client.trim()
+    ? incident.client.trim().slice(0, 128)
+    : null;
+  const ruleId = Number.isInteger(incident.rule_id) ? Number(incident.rule_id) : null;
+  const detectedAt = incident.detected_at || new Date().toISOString();
+
+  await db.prepare(`
+    INSERT INTO notification_incidents (
+      incident_key,
+      notification_type,
+      target,
+      client,
+      rule_id,
+      status,
+      first_detected_at,
+      last_detected_at,
+      resolved_at,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, 'open', ?, ?, NULL, ?)
+    ON CONFLICT(incident_key) DO UPDATE SET
+      notification_type = excluded.notification_type,
+      target = excluded.target,
+      client = excluded.client,
+      rule_id = excluded.rule_id,
+      status = 'open',
+      first_detected_at = CASE
+        WHEN notification_incidents.status = 'open' THEN notification_incidents.first_detected_at
+        ELSE excluded.first_detected_at
+      END,
+      last_detected_at = excluded.last_detected_at,
+      resolved_at = NULL,
+      last_attempt_at = CASE
+        WHEN notification_incidents.status = 'open' THEN notification_incidents.last_attempt_at
+        ELSE NULL
+      END,
+      last_sent_at = CASE
+        WHEN notification_incidents.status = 'open' THEN notification_incidents.last_sent_at
+        ELSE NULL
+      END,
+      last_error = CASE
+        WHEN notification_incidents.status = 'open' THEN notification_incidents.last_error
+        ELSE NULL
+      END,
+      updated_at = excluded.updated_at
+  `)
+    .bind(incidentKey, notificationType, target, client, ruleId, detectedAt, detectedAt, detectedAt)
+    .run();
+
+  return incidentKey;
+}
+
+export async function markNotificationIncidentAttempt(db: D1Database, incidentKey: string, time: string, error?: unknown): Promise<void> {
+  await db.prepare(`
+    UPDATE notification_incidents
+    SET last_attempt_at = ?,
+        last_error = ?,
+        updated_at = ?
+    WHERE incident_key = ?
+  `)
+    .bind(time, truncateNotificationError(error), time, incidentKey)
+    .run();
+}
+
+export async function markNotificationIncidentSent(db: D1Database, incidentKey: string, time: string): Promise<void> {
+  await db.prepare(`
+    UPDATE notification_incidents
+    SET last_attempt_at = ?,
+        last_sent_at = ?,
+        last_error = NULL,
+        updated_at = ?
+    WHERE incident_key = ?
+  `)
+    .bind(time, time, time, incidentKey)
+    .run();
+}
+
+export async function resolveNotificationIncident(db: D1Database, incidentKey: string, time: string): Promise<void> {
+  await db.prepare(`
+    UPDATE notification_incidents
+    SET status = 'resolved',
+        resolved_at = ?,
+        updated_at = ?
+    WHERE incident_key = ?
+      AND status = 'open'
+  `)
+    .bind(time, time, incidentKey)
+    .run();
+}
+
+export async function listRecentlySentLoadNotificationClients(
+  db: D1Database,
+  ruleId: number,
+  clientIds: string[],
+  sinceTime: string,
+): Promise<Set<string>> {
+  const sentClients = new Set<string>();
+  if (!Number.isInteger(ruleId) || ruleId <= 0) return sentClients;
+
+  const uniqueClientIds = normalizeUuidList(clientIds);
+  if (uniqueClientIds.length === 0) return sentClients;
+
+  for (let index = 0; index < uniqueClientIds.length; index += D1_BATCH_CHUNK_SIZE) {
+    const chunk = uniqueClientIds.slice(index, index + D1_BATCH_CHUNK_SIZE);
+    const result = await db.prepare(`
+      SELECT DISTINCT client
+      FROM notification_deliveries
+      WHERE notification_type = 'load'
+        AND status = 'sent'
+        AND rule_id = ?
+        AND client IN (${placeholders(chunk.length)})
+        AND sent_at >= ?
+    `)
+      .bind(ruleId, ...chunk, sinceTime)
+      .all<{ client: string }>();
+
+    for (const row of result.results || []) {
+      if (row.client) sentClients.add(row.client);
+    }
+  }
+
+  return sentClients;
+}
+
+export async function markOfflineNotificationAttempt(db: D1Database, client: string, time: string, error?: unknown): Promise<void> {
+  await db.prepare('UPDATE offline_notifications SET last_attempt_at = ?, last_error = ? WHERE client = ?')
+    .bind(time, truncateNotificationError(error), client).run();
+}
+
 export async function markOfflineNotificationSent(db: D1Database, client: string, time: string): Promise<void> {
-  await db.prepare('UPDATE offline_notifications SET last_notified = ? WHERE client = ?')
-    .bind(time, client).run();
+  await db.prepare('UPDATE offline_notifications SET last_notified = ?, last_sent_at = ?, last_attempt_at = ?, last_error = NULL WHERE client = ?')
+    .bind(time, time, time, client).run();
+}
+
+export async function markExpiryNotificationAttempt(db: D1Database, client: string, time: string, error?: unknown): Promise<void> {
+  await db.prepare('UPDATE expiry_notifications SET last_attempt_at = ?, last_error = ? WHERE client = ?')
+    .bind(time, truncateNotificationError(error), client).run();
+}
+
+export async function markExpiryNotificationSent(db: D1Database, client: string, time: string): Promise<void> {
+  await db.prepare('UPDATE expiry_notifications SET last_notified = ?, last_sent_at = ?, last_attempt_at = ?, last_error = NULL WHERE client = ?')
+    .bind(time, time, time, client).run();
+}
+
+export async function markLoadNotificationAttempt(db: D1Database, id: number, time: string, error?: unknown): Promise<void> {
+  await db.prepare('UPDATE load_notifications SET last_attempt_at = ?, last_error = ? WHERE id = ?')
+    .bind(time, truncateNotificationError(error), id).run();
+}
+
+export async function markLoadNotificationSent(db: D1Database, id: number, time: string): Promise<void> {
+  await db.prepare('UPDATE load_notifications SET last_notified = ?, last_sent_at = ?, last_attempt_at = ?, last_error = NULL WHERE id = ?')
+    .bind(time, time, time, id).run();
 }
 
 export async function getExpiryNotification(db: D1Database, client: string): Promise<any> {
@@ -1501,16 +2015,21 @@ export async function listExpiryNotifications(db: D1Database): Promise<any[]> {
 }
 
 export async function replaceAllExpiryNotifications(db: D1Database, notifications: any[]): Promise<void> {
-  await db.prepare('DELETE FROM expiry_notifications').run();
-  if (notifications.length === 0) return;
+  // Atomic delete+insert: DELETE must be in the same batch to prevent data loss if batch fails
+  const batch: D1PreparedStatement[] = [db.prepare('DELETE FROM expiry_notifications')];
+
+  if (notifications.length === 0) {
+    await db.batch(batch);
+    return;
+  }
 
   const stmt = db.prepare(`
     INSERT INTO expiry_notifications (client, enable, advance_days, last_notified)
     VALUES (?, ?, ?, ?)
   `);
 
-  await db.batch(
-    notifications.map((item) =>
+  batch.push(
+    ...notifications.map((item) =>
       stmt.bind(
         item.client,
         item.enable ? 1 : 0,
@@ -1519,6 +2038,8 @@ export async function replaceAllExpiryNotifications(db: D1Database, notification
       ),
     ),
   );
+
+  await db.batch(batch);
 }
 
 export async function setExpiryNotification(db: D1Database, client: string, enable: boolean, advanceDays: number): Promise<boolean> {
@@ -1532,11 +2053,6 @@ export async function setExpiryNotification(db: D1Database, client: string, enab
        OR expiry_notifications.advance_days IS NOT excluded.advance_days
   `).bind(client, enable ? 1 : 0, advanceDays).run();
   return Number(result.meta.changes || 0) > 0;
-}
-
-export async function markExpiryNotificationSent(db: D1Database, client: string, time: string): Promise<void> {
-  await db.prepare('UPDATE expiry_notifications SET last_notified = ? WHERE client = ?')
-    .bind(time, client).run();
 }
 
 const LOAD_NOTIFICATION_METRICS = new Set(['cpu', 'ram', 'load', 'disk', 'temp']);
@@ -1629,8 +2145,13 @@ export async function createLoadNotification(db: D1Database, data: any): Promise
 }
 
 export async function replaceAllLoadNotifications(db: D1Database, notifications: any[]): Promise<void> {
-  await db.prepare('DELETE FROM load_notifications').run();
-  if (notifications.length === 0) return;
+  // Atomic delete+insert: DELETE must be in the same batch to prevent data loss if batch fails
+  const batch: D1PreparedStatement[] = [db.prepare('DELETE FROM load_notifications')];
+
+  if (notifications.length === 0) {
+    await db.batch(batch);
+    return;
+  }
 
   const stmt = db.prepare(`
     INSERT INTO load_notifications (
@@ -1638,8 +2159,8 @@ export async function replaceAllLoadNotifications(db: D1Database, notifications:
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
-  await db.batch(
-    notifications.map((item) =>
+  batch.push(
+    ...notifications.map((item) =>
       stmt.bind(
         item.id || null,
         normalizeLoadNotificationValue('name', item.name),
@@ -1652,6 +2173,8 @@ export async function replaceAllLoadNotifications(db: D1Database, notifications:
       ),
     ),
   );
+
+  await db.batch(batch);
 }
 
 export async function updateLoadNotification(db: D1Database, id: number, data: any): Promise<boolean> {
@@ -1828,32 +2351,53 @@ export async function cleanupOrphanClientData(db: D1Database): Promise<OrphanCli
 
 // ============ 备份恢复 ============
 
+const RESTORE_SINGLE_BATCH_STATEMENT_LIMIT = 6000;
+
+async function runRestoreSections(db: D1Database, sections: D1PreparedStatement[][]): Promise<void> {
+  const nonEmptySections = sections.filter(section => section.length > 0);
+  const totalStatements = nonEmptySections.reduce((sum, section) => sum + section.length, 0);
+  if (totalStatements === 0) return;
+
+  if (totalStatements <= RESTORE_SINGLE_BATCH_STATEMENT_LIMIT) {
+    await db.batch(nonEmptySections.flat());
+    return;
+  }
+
+  for (const section of nonEmptySections) {
+    await db.batch(section);
+  }
+}
+
 export async function restoreBackupData(db: D1Database, backup: BackupData): Promise<void> {
-  const statements: D1PreparedStatement[] = [];
+  const sections: D1PreparedStatement[][] = [];
 
   if (backup.settings !== undefined) {
-    statements.push(db.prepare('DELETE FROM settings'));
+    const statements: D1PreparedStatement[] = [db.prepare('DELETE FROM settings')];
     const stmt = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
     for (const [key, value] of Object.entries(backup.settings)) {
       statements.push(stmt.bind(key, value));
     }
+    sections.push(statements);
   }
 
   if (backup.clients !== undefined) {
-    statements.push(db.prepare('DELETE FROM clients'));
+    const statements: D1PreparedStatement[] = [db.prepare('DELETE FROM clients')];
     const stmt = db.prepare(`
       INSERT INTO clients (
-        uuid, token, name, cpu_name, virtualization, arch, cpu_cores, os,
+        uuid, token, token_hash, token_prefix, name, cpu_name, virtualization, arch, cpu_cores, os,
         kernel_version, gpu_name, ipv4, ipv6, region, remark, public_remark,
         mem_total, swap_total, disk_total, version, price, billing_cycle,
         auto_renewal, currency, expired_at, "group", tags, hidden, traffic_limit,
-        traffic_limit_type, sort_order, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        traffic_limit_type, sort_order, last_report_interval_sec, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     for (const [index, client] of backup.clients.entries()) {
+      const token = await normalizeClientTokenForStorage(client);
       statements.push(stmt.bind(
         client.uuid || crypto.randomUUID(),
-        client.token || crypto.randomUUID(),
+        token.storedToken,
+        token.tokenHash,
+        token.tokenPrefix,
         client.name || '',
         client.cpu_name || '',
         client.virtualization || '',
@@ -1882,14 +2426,16 @@ export async function restoreBackupData(db: D1Database, backup: BackupData): Pro
         client.traffic_limit || 0,
         client.traffic_limit_type || 'max',
         client.sort_order || index + 1,
+        client.last_report_interval_sec || null,
         client.created_at || new Date().toISOString(),
         client.updated_at || new Date().toISOString(),
       ));
     }
+    sections.push(statements);
   }
 
   if (backup.ping_tasks !== undefined) {
-    statements.push(db.prepare('DELETE FROM ping_tasks'));
+    const statements: D1PreparedStatement[] = [db.prepare('DELETE FROM ping_tasks')];
     const stmt = db.prepare(`
       INSERT INTO ping_tasks (id, name, clients, all_clients, type, target, interval_sec, sort_order)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -1906,10 +2452,11 @@ export async function restoreBackupData(db: D1Database, backup: BackupData): Pro
         task.sort_order || task.id || 0,
       ));
     }
+    sections.push(statements);
   }
 
   if (backup.offline_notifications !== undefined) {
-    statements.push(db.prepare('DELETE FROM offline_notifications'));
+    const statements: D1PreparedStatement[] = [db.prepare('DELETE FROM offline_notifications')];
     const stmt = db.prepare(`
       INSERT INTO offline_notifications (client, enable, grace_period, last_notified)
       VALUES (?, ?, ?, ?)
@@ -1922,10 +2469,11 @@ export async function restoreBackupData(db: D1Database, backup: BackupData): Pro
         item.last_notified || null,
       ));
     }
+    sections.push(statements);
   }
 
   if (backup.expiry_notifications !== undefined) {
-    statements.push(db.prepare('DELETE FROM expiry_notifications'));
+    const statements: D1PreparedStatement[] = [db.prepare('DELETE FROM expiry_notifications')];
     const stmt = db.prepare(`
       INSERT INTO expiry_notifications (client, enable, advance_days, last_notified)
       VALUES (?, ?, ?, ?)
@@ -1938,10 +2486,11 @@ export async function restoreBackupData(db: D1Database, backup: BackupData): Pro
         item.last_notified || null,
       ));
     }
+    sections.push(statements);
   }
 
   if (backup.load_notifications !== undefined) {
-    statements.push(db.prepare('DELETE FROM load_notifications'));
+    const statements: D1PreparedStatement[] = [db.prepare('DELETE FROM load_notifications')];
     const stmt = db.prepare(`
       INSERT INTO load_notifications (
         id, name, clients, metric, threshold, ratio, interval_min, last_notified
@@ -1959,17 +2508,34 @@ export async function restoreBackupData(db: D1Database, backup: BackupData): Pro
         normalizeLoadNotificationValue('last_notified', item.last_notified),
       ));
     }
+    sections.push(statements);
   }
 
-  if (statements.length === 0) return;
-  await db.batch(statements);
+  await runRestoreSections(db, sections);
 }
 
 // ============ 审计日志 ============
 
+export type AuditLogLevel = 'info' | 'warning' | 'error';
+
+export function normalizeAuditLogLevel(level: unknown): AuditLogLevel {
+  if (level === 'error') return 'error';
+  if (level === 'warning' || level === 'warn') return 'warning';
+  return 'info';
+}
+
+// SEC-5: Sanitize audit detail to remove control characters that could break log parsing
+function sanitizeAuditDetail(detail: string): string {
+  if (!detail) return '';
+  // Remove control characters (0x00-0x1F except tab/newline, and 0x7F-0x9F)
+  // Keep tab (0x09), newline (0x0A), carriage return (0x0D) for structured logs
+  return detail.replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F-\x9F]/g, '');
+}
+
 export async function insertAuditLog(db: D1Database, user: string, action: string, detail: string, level: string = 'info'): Promise<void> {
-  await db.prepare('INSERT INTO audit_logs (user, action, detail, level) VALUES (?, ?, ?, ?)')
-    .bind(user, action, detail, level).run();
+  const sanitizedDetail = sanitizeAuditDetail(detail);
+  await db.prepare('INSERT INTO audit_logs (time, user, action, detail, level) VALUES (?, ?, ?, ?, ?)')
+    .bind(new Date().toISOString(), user, action, sanitizedDetail, normalizeAuditLogLevel(level)).run();
 }
 
 export async function listAuditLogs(db: D1Database, limit: number = 100): Promise<any[]> {
@@ -2003,7 +2569,23 @@ export async function listAuditLogsPaged(
 
 export async function deleteOldAuditLogs(db: D1Database, beforeTime: string, options: DeleteOldRowsOptions = {}): Promise<{ audit_logs: number }> {
   return {
-    audit_logs: await deleteRowsByIdBatch(db, 'audit_logs', 'WHERE time < ?', [beforeTime], options),
+    audit_logs: await deleteRowsByIdBatch(db, 'audit_logs', 'WHERE unixepoch(time) < unixepoch(?)', [beforeTime], options),
+  };
+}
+
+export async function deleteOldNotificationDeliveries(
+  db: D1Database,
+  beforeTime: string,
+  options: DeleteOldRowsOptions = {},
+): Promise<{ notification_deliveries: number }> {
+  return {
+    notification_deliveries: await deleteRowsByIdBatch(
+      db,
+      'notification_deliveries',
+      'WHERE attempted_at < ?',
+      [beforeTime],
+      options,
+    ),
   };
 }
 
@@ -2014,9 +2596,13 @@ export interface TableRowCounts {
   ping_records: number;
   ping_snapshots: number;
   audit_logs: number;
+  notification_deliveries: number;
 }
 
-export type HistoryTableRowCounts = Omit<TableRowCounts, 'audit_logs'>;
+export type HistoryTableRowCounts = Pick<
+  TableRowCounts,
+  'records' | 'gpu_records' | 'gpu_snapshots' | 'ping_records' | 'ping_snapshots'
+>;
 
 async function countTableRows(db: D1Database, table: keyof TableRowCounts): Promise<number> {
   const row = await db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).first<{ count: number }>();
@@ -2024,13 +2610,14 @@ async function countTableRows(db: D1Database, table: keyof TableRowCounts): Prom
 }
 
 export async function getStorageRowCounts(db: D1Database): Promise<TableRowCounts> {
-  const [records, gpuRecords, gpuSnapshots, pingRecords, pingSnapshots, auditLogs] = await Promise.all([
+  const [records, gpuRecords, gpuSnapshots, pingRecords, pingSnapshots, auditLogs, notificationDeliveries] = await Promise.all([
     countTableRows(db, 'records'),
     countTableRows(db, 'gpu_records'),
     countTableRows(db, 'gpu_snapshots'),
     countTableRows(db, 'ping_records'),
     countTableRows(db, 'ping_snapshots'),
     countTableRows(db, 'audit_logs'),
+    countTableRows(db, 'notification_deliveries'),
   ]);
   return {
     records,
@@ -2039,9 +2626,75 @@ export async function getStorageRowCounts(db: D1Database): Promise<TableRowCount
     ping_records: pingRecords,
     ping_snapshots: pingSnapshots,
     audit_logs: auditLogs,
+    notification_deliveries: notificationDeliveries,
   };
 }
 
+export async function getStorageRowCountsFast(db: D1Database): Promise<TableRowCounts> {
+  const [historyCounts, auditLogs, notificationDeliveries] = await Promise.all([
+    getHistoryStorageRowCountsFast(db),
+    countTableRows(db, 'audit_logs'),
+    countTableRows(db, 'notification_deliveries'),
+  ]);
+  return {
+    ...historyCounts,
+    audit_logs: auditLogs,
+    notification_deliveries: notificationDeliveries,
+  };
+}
+
+/**
+ * 快速获取历史表行数（使用增量计数表）
+ *
+ * 性能优化：从 COUNT(*) 全表扫描（每次读取所有行）
+ *          优化为单表查询（5行）
+ *
+ * 在 100 节点、72h 保留场景下：
+ * - 修复前: 每次检查读取 ~157,680 行，blocked 模式下 227M reads/天
+ * - 修复后: 每次检查读取 5 行，blocked 模式下 ~7,200 reads/天
+ * - 节省: 99.997% 配额
+ */
+export async function getHistoryStorageRowCountsFast(db: D1Database): Promise<HistoryTableRowCounts> {
+  const tables = ['records', 'gpu_records', 'gpu_snapshots', 'ping_records', 'ping_snapshots'] as const;
+  const rows = await db.prepare(
+    'SELECT table_name, row_count FROM history_row_counters WHERE table_name IN (?, ?, ?, ?, ?)'
+  )
+    .bind(...tables)
+    .all<{ table_name: string; row_count: number }>();
+
+  const countsMap = new Map(rows.results.map(r => [r.table_name, r.row_count]));
+  if (tables.some(table => !countsMap.has(table))) {
+    const counts = await getHistoryStorageRowCounts(db);
+    const stmt = db.prepare(`
+      INSERT INTO history_row_counters (table_name, row_count, updated_at)
+      VALUES (?, ?, datetime('now'))
+      ON CONFLICT(table_name) DO UPDATE SET
+        row_count = excluded.row_count,
+        updated_at = excluded.updated_at
+    `);
+    await db.batch(tables.map(table => stmt.bind(table, counts[table])));
+    return counts;
+  }
+
+  return {
+    records: countsMap.get('records') || 0,
+    gpu_records: countsMap.get('gpu_records') || 0,
+    gpu_snapshots: countsMap.get('gpu_snapshots') || 0,
+    ping_records: countsMap.get('ping_records') || 0,
+    ping_snapshots: countsMap.get('ping_snapshots') || 0,
+  };
+}
+
+/**
+ * 获取历史表行数（使用 COUNT(*) 全表扫描）
+ *
+ * ⚠️ 警告：此函数在大规模场景下性能较差
+ * 建议使用 getHistoryStorageRowCountsFast() 替代
+ *
+ * 保留此函数用于：
+ * 1. 迁移后验证计数准确性
+ * 2. 手动修复计数偏差
+ */
 export async function getHistoryStorageRowCounts(db: D1Database): Promise<HistoryTableRowCounts> {
   const [records, gpuRecords, gpuSnapshots, pingRecords, pingSnapshots] = await Promise.all([
     countTableRows(db, 'records'),
@@ -2059,22 +2712,31 @@ export async function getHistoryStorageRowCounts(db: D1Database): Promise<Histor
   };
 }
 
-async function countExpiredRows(db: D1Database, table: keyof TableRowCounts, beforeTime: string): Promise<number> {
-  const row = await db.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE time < ?`).bind(beforeTime).first<{ count: number }>();
+async function countExpiredRows(
+  db: D1Database,
+  table: keyof TableRowCounts,
+  beforeTime: string,
+  timeColumn = 'time',
+): Promise<number> {
+  const row = await db.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE ${timeColumn} < ?`)
+    .bind(beforeTime)
+    .first<{ count: number }>();
   return Number(row?.count || 0);
 }
 
 export async function getExpiredRowCounts(
   db: D1Database,
-  beforeTimes: { records: string; ping_records: string; audit_logs: string },
+  beforeTimes: { records: string; ping_records: string; audit_logs: string; notification_deliveries?: string },
 ): Promise<TableRowCounts> {
-  const [records, gpuRecords, gpuSnapshots, pingRecords, pingSnapshots, auditLogs] = await Promise.all([
+  const notificationDeliveriesBefore = beforeTimes.notification_deliveries || beforeTimes.audit_logs;
+  const [records, gpuRecords, gpuSnapshots, pingRecords, pingSnapshots, auditLogs, notificationDeliveries] = await Promise.all([
     countExpiredRows(db, 'records', beforeTimes.records),
     countExpiredRows(db, 'gpu_records', beforeTimes.records),
     countExpiredRows(db, 'gpu_snapshots', beforeTimes.records),
     countExpiredRows(db, 'ping_records', beforeTimes.ping_records),
     countExpiredRows(db, 'ping_snapshots', beforeTimes.ping_records),
     countExpiredRows(db, 'audit_logs', beforeTimes.audit_logs),
+    countExpiredRows(db, 'notification_deliveries', notificationDeliveriesBefore, 'attempted_at'),
   ]);
   return {
     records,
@@ -2083,5 +2745,6 @@ export async function getExpiredRowCounts(
     ping_records: pingRecords,
     ping_snapshots: pingSnapshots,
     audit_logs: auditLogs,
+    notification_deliveries: notificationDeliveries,
   };
 }

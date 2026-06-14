@@ -64,12 +64,13 @@ export default function Login() {
               </Text>
               <TextField.Root
                 id="login-username"
+                name="username"
                 size="3"
-                placeholder="请输入用户名"
+                placeholder="请输入用户名…"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 autoComplete="username"
-                autoFocus
+                spellCheck={false}
                 style={{ width: '100%' }}
               />
             </label>
@@ -81,12 +82,14 @@ export default function Login() {
               <div style={{ position: 'relative' }}>
                 <TextField.Root
                   id="login-password"
+                  name="password"
                   size="3"
                   type={showPassword ? 'text' : 'password'}
-                  placeholder="请输入密码"
+                  placeholder="请输入密码…"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   autoComplete="current-password"
+                  spellCheck={false}
                   style={{ width: '100%', paddingRight: 40 }}
                 />
                 <button
@@ -117,7 +120,7 @@ export default function Login() {
               }}
             >
               <LogIn size={18} />
-              {loading ? '登录中...' : '登录'}
+              {loading ? '登录中…' : '登录'}
             </Button>
           </Flex>
         </form>

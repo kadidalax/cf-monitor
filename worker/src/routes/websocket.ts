@@ -6,7 +6,7 @@ import { Hono } from 'hono';
 import type { Bindings, Variables } from '../index';
 import * as db from '../db/queries';
 import { createViewerToken, verifyViewerToken } from '../auth/viewer-token';
-import { getAgentClientIdentityByToken } from './client';
+import { enforceAgentAuthRateLimit, getAgentClientIdentityByToken } from './client';
 
 const wsRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 const VIEWER_TOKEN_RATE_LIMIT_WINDOW_MS = 60_000;
@@ -137,6 +137,9 @@ wsRoutes.get('/clients/report', async (c) => {
   if (!token) {
     return c.json({ error: 'Missing token' }, 401);
   }
+
+  const limited = await enforceAgentAuthRateLimit(c, token);
+  if (limited) return limited;
 
   const client = await getAgentClientIdentityByToken(c.env.DB, token);
   if (!client) {

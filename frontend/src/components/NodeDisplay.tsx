@@ -85,7 +85,7 @@ export default function NodeDisplay({
           <Flex className="node-control-row" justify="between" align="center" gap="2">
             <Box ref={searchRef} className="node-control-search">
               <TextField.Root
-                placeholder="搜索名称、地区、系统、IP"
+                placeholder="搜索服务器"
                 value={searchTerm}
                 onChange={(event) => setSearchTerm(event.target.value)}
               >
@@ -110,6 +110,18 @@ export default function NodeDisplay({
               </TextField.Root>
             </Box>
 
+            <Flex className="node-filter-stats" align="center" gap="2">
+              <Badge size="1" variant="soft" color="blue">
+                当前结果 {filteredNodes.length}
+              </Badge>
+              <Badge size="1" variant="soft" color="green">
+                在线 {onlineVisibleCount}
+              </Badge>
+              <Badge size="1" variant="soft" color="gray">
+                总节点 {nodes.length}
+              </Badge>
+            </Flex>
+
             <Flex className="node-control-actions">
               <Box className="node-status-filter">
                 <SegmentedControl.Root
@@ -125,11 +137,8 @@ export default function NodeDisplay({
 
               {groups.length > 0 && (
                 <Flex className="node-group-filter" align="center" gap="2">
-                  <Text size="2" color="gray" style={{ whiteSpace: 'nowrap' }}>
-                    分组
-                  </Text>
                   <Select.Root value={selectedGroup} onValueChange={setSelectedGroup}>
-                    <Select.Trigger aria-label="分组筛选" style={{ minWidth: 132 }} />
+                    <Select.Trigger className="node-group-select-trigger" aria-label="分组筛选" />
                     <Select.Content>
                       <Select.Item value="all">全部分组</Select.Item>
                       {groups.map((group) => (
@@ -142,34 +151,26 @@ export default function NodeDisplay({
                 </Flex>
               )}
 
-              <Flex className="node-filter-stats" align="center" gap="2">
-                <Badge size="1" variant="soft" color="blue">
-                  当前结果 {filteredNodes.length}
-                </Badge>
-                <Badge size="1" variant="soft" color="green">
-                  在线 {onlineVisibleCount}
-                </Badge>
-                <Badge size="1" variant="soft" color="gray">
-                  总节点 {nodes.length}
-                </Badge>
+              <Flex className="node-view-switch" align="center" gap="1">
+                <IconButton
+                  aria-label="网格视图"
+                  title="网格视图"
+                  variant={viewMode === 'grid' ? 'solid' : 'soft'}
+                  size="2"
+                  onClick={() => toggleView('grid')}
+                >
+                  <Grid3X3 size={16} />
+                </IconButton>
+                <IconButton
+                  aria-label="表格视图"
+                  title="表格视图"
+                  variant={viewMode === 'table' ? 'solid' : 'soft'}
+                  size="2"
+                  onClick={() => toggleView('table')}
+                >
+                  <Table2 size={16} />
+                </IconButton>
               </Flex>
-
-              <IconButton
-                aria-label="网格视图"
-                variant={viewMode === 'grid' ? 'solid' : 'soft'}
-                size="2"
-                onClick={() => toggleView('grid')}
-              >
-                <Grid3X3 size={16} />
-              </IconButton>
-              <IconButton
-                aria-label="表格视图"
-                variant={viewMode === 'table' ? 'solid' : 'soft'}
-                size="2"
-                onClick={() => toggleView('table')}
-              >
-                <Table2 size={16} />
-              </IconButton>
             </Flex>
           </Flex>
         </Flex>

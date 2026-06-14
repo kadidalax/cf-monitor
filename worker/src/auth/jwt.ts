@@ -16,6 +16,7 @@ type JwtEnv = {
 export type AdminJwtPayload = {
   userId: string;
   username: string;
+  sessionVersion: number;
 };
 
 export function requireJwtSecret(env: JwtEnv): string {
@@ -29,11 +30,13 @@ export function requireJwtSecret(env: JwtEnv): string {
   return secret;
 }
 
-export async function generateToken(userId: string, username: string, env: JwtEnv): Promise<string> {
+export async function generateToken(userId: string, username: string, env: JwtEnv, sessionVersion = 0): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
   const payload = {
     userId,
     username,
+    sessionVersion,
+    type: 'access',
     iat: now,
     exp: now + 7 * 24 * 60 * 60,
   };
@@ -46,6 +49,7 @@ export async function verifyAdminToken(token: string, env: JwtEnv): Promise<Admi
 
   if (
     !payload ||
+    (payload.type !== undefined && payload.type !== 'access') ||
     typeof payload.userId !== 'string' ||
     typeof payload.username !== 'string'
   ) {
@@ -55,5 +59,6 @@ export async function verifyAdminToken(token: string, env: JwtEnv): Promise<Admi
   return {
     userId: payload.userId,
     username: payload.username,
+    sessionVersion: typeof payload.sessionVersion === 'number' ? payload.sessionVersion : 0,
   };
 }

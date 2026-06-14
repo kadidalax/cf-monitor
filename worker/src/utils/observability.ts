@@ -16,9 +16,11 @@ export const HEALTH_COMPONENTS = [
   'do_record_persistence',
   'ping_persistence',
   'telegram',
+  'notification_delivery',
   'cron_cleanup',
   'cron_load',
   'cron_offline',
+  'history_counter_repair',
 ] as const;
 
 const HEALTH_KEY_PREFIX = 'health:';

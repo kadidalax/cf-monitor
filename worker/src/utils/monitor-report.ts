@@ -44,6 +44,17 @@ function boundedInteger(min: number, max: number, ...values: unknown[]): number 
   return Math.trunc(boundedNumber(min, max, ...values));
 }
 
+function optionalBoundedInteger(min: number, max: number, ...values: unknown[]): number | undefined {
+  for (const value of values) {
+    const parsed = numberFrom(value);
+    if (parsed === undefined) continue;
+    if (parsed < min) return min;
+    if (parsed > max) return max;
+    return Math.trunc(parsed);
+  }
+  return undefined;
+}
+
 function boundedString(value: unknown, maxLength: number): string {
   return String(value || '').trim().slice(0, maxLength);
 }
@@ -101,6 +112,7 @@ export function normalizeMonitorReport(input: any): AnyRecord {
     connections: boundedInteger(0, MAX_COUNT_VALUE, report.connections, connections.tcp),
     connections_udp: boundedInteger(0, MAX_COUNT_VALUE, report.connections_udp, connections.udp),
     uptime: boundedNumber(0, MAX_UPTIME_SECONDS, report.uptime),
+    report_interval: optionalBoundedInteger(1, 3600, report.report_interval, report.report_interval_sec, report.interval_sec, report.interval),
     version: boundedString(report.version, 64),
     gpus,
   };

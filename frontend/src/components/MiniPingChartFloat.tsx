@@ -4,7 +4,10 @@ import MiniPingChart from './MiniPingChart';
 
 interface MiniPingChartFloatProps {
   uuid: string;
-  trigger: React.ReactNode;
+  trigger: React.ReactElement<{
+    onClick?: React.MouseEventHandler<HTMLElement>;
+    onPointerDown?: React.PointerEventHandler<HTMLElement>;
+  }>;
   chartWidth?: string | number;
   chartHeight?: number;
   limit?: number;
@@ -21,31 +24,28 @@ export default function MiniPingChartFloat({
 }: MiniPingChartFloatProps) {
   const [open, setOpen] = useState(false);
 
-  const handleTriggerClick = useCallback((event: React.MouseEvent<HTMLSpanElement>) => {
+  const handleTriggerClick = useCallback((event: React.MouseEvent<HTMLElement>) => {
+    const wasDefaultPrevented = event.defaultPrevented;
+    trigger.props.onClick?.(event);
     event.preventDefault();
     event.stopPropagation();
-    setOpen((current) => !current);
-  }, []);
+    if (!wasDefaultPrevented) setOpen((current) => !current);
+  }, [trigger]);
 
-  const handleTriggerPointerDown = useCallback((event: React.PointerEvent<HTMLSpanElement>) => {
+  const handleTriggerPointerDown = useCallback((event: React.PointerEvent<HTMLElement>) => {
+    trigger.props.onPointerDown?.(event);
     event.stopPropagation();
-  }, []);
+  }, [trigger]);
+
+  const triggerElement = React.cloneElement(trigger, {
+    onClick: handleTriggerClick,
+    onPointerDown: handleTriggerPointerDown,
+  });
 
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
       <Popover.Trigger>
-        <span
-          onClick={handleTriggerClick}
-          onPointerDown={handleTriggerPointerDown}
-          style={{
-            cursor: 'pointer',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-          }}
-        >
-          {trigger}
-        </span>
+        {triggerElement}
       </Popover.Trigger>
       <Popover.Content
         align="end"

@@ -26,8 +26,14 @@ const AdminLogs = lazy(() => import('./pages/admin/AuditLogs'));
 const AdminAccount = lazy(() => import('./pages/admin/Account'));
 const AdminAbout = lazy(() => import('./pages/admin/About'));
 
-function LiveDataRoute({ children }: { children: React.ReactNode }) {
-  return <LiveDataProvider>{children}</LiveDataProvider>;
+function LiveDataRoute({
+  children,
+  viewer = true,
+}: {
+  children: React.ReactNode;
+  viewer?: boolean;
+}) {
+  return <LiveDataProvider viewer={viewer}>{children}</LiveDataProvider>;
 }
 
 function LegacySettingsNotificationRedirect() {
@@ -54,8 +60,8 @@ export default function App() {
                 <Route path="/admin/login" element={<Login />} />
 
                   <Route path="/admin" element={<AdminLayout />}>
-                    <Route index element={<LiveDataRoute><AdminDashboard /></LiveDataRoute>} />
-                  <Route path="clients" element={<LiveDataRoute><AdminClients /></LiveDataRoute>} />
+                    <Route index element={<LiveDataRoute viewer={false}><AdminDashboard /></LiveDataRoute>} />
+                  <Route path="clients" element={<LiveDataRoute viewer={false}><AdminClients /></LiveDataRoute>} />
                   <Route path="settings" element={<SettingsLayout />}>
                     <Route index element={<SettingsSite />} />
                     <Route path="site" element={<SettingsSite />} />

@@ -239,7 +239,7 @@ export default function NodeCard({ client, live, online }: NodeCardProps) {
                 </Flex>
                 <Flex className="node-card-komari-title-meta" align="center" gap="2">
                   <span className="node-os-chip">
-                    <img src={osConfig.image} alt="" aria-hidden="true" />
+                    <img src={osConfig.image} alt="" aria-hidden="true" width={16} height={16} />
                     {osConfig.name}
                   </span>
                   <span className="node-card-billing-row" aria-hidden={!hasBillingInfo}>
@@ -291,7 +291,7 @@ export default function NodeCard({ client, live, online }: NodeCardProps) {
             <div className="node-card-system-line">
               <div className="node-card-system-main">
                 <Flex align="center" gap="1" style={{ minWidth: 0 }}>
-                  <img src={osConfig.image} alt={osConfig.name} style={{ width: 16, height: 16 }} />
+                  <img src={osConfig.image} alt={osConfig.name} width={16} height={16} style={{ width: 16, height: 16 }} />
                   <Text size="1" truncate>{osConfig.name} / {client.arch || '-'}</Text>
                 </Flex>
                 <span className="node-card-billing-row node-card-system-billing-row" aria-hidden={!hasBillingInfo}>

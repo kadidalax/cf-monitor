@@ -1,4 +1,3 @@
-import React from 'react';
 import { Box, Flex, Select, Text, TextField } from '@radix-ui/themes';
 import {
   BANDWIDTH_UNITS,

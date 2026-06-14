@@ -1,5 +1,5 @@
 const PASSWORD_ALGORITHM = 'pbkdf2_sha256';
-const PBKDF2_ITERATIONS = 20000;
+const PBKDF2_ITERATIONS = 210000;
 const MIN_ACCEPTED_PBKDF2_ITERATIONS = 10000;
 const SALT_BYTES = 16;
 const HASH_BYTES = 32;
@@ -111,7 +111,8 @@ export async function hashPassword(password: string): Promise<string> {
 }
 
 export function needsPasswordRehash(hash: string): boolean {
-  return parsePasswordHash(hash) === null;
+  const parsed = parsePasswordHash(hash);
+  return parsed === null || parsed.iterations < PBKDF2_ITERATIONS;
 }
 
 export function passwordHashExceedsCurrentCost(hash: string): boolean {

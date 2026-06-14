@@ -5,10 +5,10 @@ import { Download, Save, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
 import { useApi } from '../../contexts/AuthContext';
-import { SettingCard, SettingInput } from '../../components/admin/SettingCard';
+import { SettingCard, SettingInput, SettingToggle } from '../../components/admin/SettingCard';
+import { getChangedSettings, type SettingsMap } from '../../utils/settingsDiff';
 import type { SettingsLayoutOutletContext } from './SettingsLayout';
 
-type SettingsMap = Record<string, string>;
 const CSRF_COOKIE_NAME = 'cf_monitor_csrf';
 
 function readCookie(name: string): string {
@@ -24,13 +24,18 @@ export default function SettingsSite() {
   const apiFetch = useApi();
   const { setAction } = useOutletContext<SettingsLayoutOutletContext>();
   const [settings, setSettings] = useState<SettingsMap>({});
+  const [originalSettings, setOriginalSettings] = useState<SettingsMap>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    apiFetch('/admin/settings')
+    apiFetch('/admin/settings?scope=site')
       .then((data) => {
-        if (data && typeof data === 'object') setSettings(data as SettingsMap);
+        if (data && typeof data === 'object') {
+          const nextSettings = data as SettingsMap;
+          setSettings(nextSettings);
+          setOriginalSettings(nextSettings);
+        }
       })
       .finally(() => setLoading(false));
   }, [apiFetch]);
@@ -40,24 +45,34 @@ export default function SettingsSite() {
   };
 
   const handleSave = useCallback(async () => {
+    const changedSettings = getChangedSettings(settings, originalSettings);
+    if (Object.keys(changedSettings).length === 0) {
+      toast.info('没有需要保存的改动');
+      return;
+    }
+
     setSaving(true);
     try {
       const result = await apiFetch('/admin/settings', {
         method: 'POST',
-        body: JSON.stringify(settings),
+        body: JSON.stringify(changedSettings),
       });
-      if (result.success) toast.success('设置已保存');
-      else toast.error(result.error || '保存失败');
+      if (result.success) {
+        setOriginalSettings((prev) => ({ ...prev, ...changedSettings }));
+        toast.success('设置已保存');
+      } else {
+        toast.error(result.error || '保存失败');
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '保存失败');
     } finally {
       setSaving(false);
     }
-  }, [apiFetch, settings]);
+  }, [apiFetch, originalSettings, settings]);
 
   const headerAction = useMemo(() => (
     <Button onClick={handleSave} disabled={loading || saving}>
-      <Save size={16} /> {saving ? '保存中...' : '保存'}
+      <Save size={16} /> {saving ? '保存中…' : '保存'}
     </Button>
   ), [handleSave, loading, saving]);
 
@@ -66,7 +81,7 @@ export default function SettingsSite() {
     return () => setAction(null);
   }, [headerAction, setAction]);
 
-  const downloadBackupFile = async (filename: string, backupPassword: string) => {
+  const downloadBackupFile = async (filename: string, backupPassword: string, reauthPassword: string) => {
     const headers: Record<string, string> = {};
     const csrfToken = readCookie(CSRF_COOKIE_NAME);
     if (csrfToken) headers['X-CSRF-Token'] = csrfToken;
@@ -75,7 +90,7 @@ export default function SettingsSite() {
       method: 'POST',
       credentials: 'same-origin',
       headers,
-      body: JSON.stringify({ backup_password: backupPassword }),
+      body: JSON.stringify({ backup_password: backupPassword, reauth_password: reauthPassword }),
     });
     if (!response.ok) {
       const error = await response.json().catch(() => null);
@@ -94,9 +109,11 @@ export default function SettingsSite() {
   const handleDownloadBackup = async () => {
     const password = window.prompt('请输入备份文件加密密码，至少 12 字节。恢复时必须使用同一个密码。');
     if (!password) return;
+    const reauthPassword = window.prompt('请输入当前管理员密码以确认下载备份');
+    if (!reauthPassword) return;
 
     try {
-      await downloadBackupFile(`cf-monitor-encrypted-backup-${new Date().toISOString().slice(0, 10)}.json`, password);
+      await downloadBackupFile(`cf-monitor-encrypted-backup-${new Date().toISOString().slice(0, 10)}.json`, password, reauthPassword);
       toast.success('加密完整备份已下载，请保存好备份密码');
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '备份下载失败');
@@ -113,12 +130,15 @@ export default function SettingsSite() {
       if (!password) return;
       const beforeRestorePassword = window.prompt('恢复前会自动下载当前配置的加密备份，请设置一个临时备份密码');
       if (!beforeRestorePassword) return;
-      await downloadBackupFile(`cf-monitor-before-restore-${new Date().toISOString().slice(0, 10)}.json`, beforeRestorePassword);
+      const reauthPassword = window.prompt('请输入当前管理员密码以确认恢复备份');
+      if (!reauthPassword) return;
+      await downloadBackupFile(`cf-monitor-before-restore-${new Date().toISOString().slice(0, 10)}.json`, beforeRestorePassword, reauthPassword);
       const result = await apiFetch('/admin/upload/backup?confirm_restore=true&acknowledge_overwrite=true', {
         method: 'POST',
         body: JSON.stringify({
           backup: data,
           backup_password: password,
+          reauth_password: reauthPassword,
           confirm_restore: true,
           acknowledge_overwrite: true,
         }),
@@ -130,8 +150,11 @@ export default function SettingsSite() {
       }
 
       toast.success('备份已恢复');
-      const nextSettings = await apiFetch('/admin/settings');
-      if (nextSettings && typeof nextSettings === 'object') setSettings(nextSettings as SettingsMap);
+      const nextSettings = await apiFetch('/admin/settings?scope=site');
+      if (nextSettings && typeof nextSettings === 'object') {
+        setSettings(nextSettings as SettingsMap);
+        setOriginalSettings(nextSettings as SettingsMap);
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : '备份文件格式错误');
     } finally {
@@ -178,6 +201,12 @@ export default function SettingsSite() {
           value={settings.script_domain || ''}
           onChange={(value) => updateSetting('script_domain', value)}
           placeholder={window.location.origin}
+        />
+        <SettingToggle
+          label="公开隐私模式"
+          description="隐藏公开 API 和面板中的地域、价格、到期、流量限制、公开备注、系统版本等运营信息"
+          checked={settings.public_privacy_mode === 'true'}
+          onCheckedChange={(checked) => updateSetting('public_privacy_mode', checked ? 'true' : 'false')}
         />
       </SettingCard>
 

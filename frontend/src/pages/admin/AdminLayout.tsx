@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { Outlet, Link, useNavigate, useLocation } from "react-router-dom";
 import { Flex, Text, Button, IconButton } from "@radix-ui/themes";
 import { LogOut, Menu, X, Home, Github, Palette, Sun, Moon, Laptop } from "lucide-react";
@@ -19,6 +19,7 @@ export default function AdminLayout() {
   const location = useLocation();
   const githubUrl = CF_MONITOR_GITHUB_URL;
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
   const [version, setVersion] = useState("v2.0.0");
 
   useEffect(() => {
@@ -42,7 +43,9 @@ export default function AdminLayout() {
   // responsive sidebar
   useEffect(() => {
     const handleResize = () => {
-      setSidebarOpen(window.innerWidth >= 768);
+      const mobile = window.innerWidth < 768;
+      setIsMobile(mobile);
+      setSidebarOpen(!mobile);
     };
     handleResize();
     window.addEventListener("resize", handleResize);
@@ -88,16 +91,21 @@ export default function AdminLayout() {
   return (
     <Flex style={{ height: "100vh", overflow: "hidden" }}>
       {/* Mobile overlay */}
-      {sidebarOpen && window.innerWidth < 768 && (
+      {sidebarOpen && isMobile && (
         <div className="mobile-sidebar-overlay" onClick={() => setSidebarOpen(false)} />
       )}
 
-      {/* Mobile toggle button */}
+      {/* Mobile toggle button - 问题6: x按钮跟随菜单移动 */}
       <IconButton
         className="mobile-sidebar-toggle"
         onClick={() => setSidebarOpen((v) => !v)}
         aria-label={sidebarOpen ? "关闭菜单" : "打开菜单"}
         title={sidebarOpen ? "关闭菜单" : "打开菜单"}
+        style={
+          isMobile && sidebarOpen
+            ? { left: "164px" }
+            : undefined
+        }
       >
         {sidebarOpen ? <X size={20} /> : <Menu size={20} />}
       </IconButton>
@@ -111,11 +119,6 @@ export default function AdminLayout() {
             </Text>
             <Text size="1" color="gray">管理后台</Text>
           </Flex>
-          {window.innerWidth < 768 && (
-            <IconButton variant="ghost" size="1" onClick={() => setSidebarOpen(false)} aria-label="关闭菜单">
-              <X size={16} />
-            </IconButton>
-          )}
         </Flex>
 
         <nav className="admin-sidebar-nav" style={{ flex: 1, overflowY: "auto" }}>
@@ -348,8 +351,8 @@ export default function AdminLayout() {
             top: 0;
             left: 0;
             bottom: 0;
-            width: 270px;
-            min-width: 270px;
+            width: 208px;
+            min-width: 208px;
             transform: translateX(-100%);
             transition: transform 0.3s ease;
             z-index: 45;
@@ -386,6 +389,7 @@ export default function AdminLayout() {
             background: var(--monitor-panel-strong);
             color: var(--gray-12);
             padding: 8px;
+            transition: left 0.3s ease;
           }
           .mobile-sidebar-overlay {
             display: block !important;

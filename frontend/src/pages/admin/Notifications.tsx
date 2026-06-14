@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState, useMemo } from 'react';
+import { useCallback, useEffect, useState, useMemo } from 'react';
 import {
   Flex, Card, Text, Button, TextField,
   Dialog, Badge, Switch, Table, Tabs, Select,
@@ -10,26 +10,46 @@ import { toast } from 'sonner';
 import Loading from '../../components/Loading';
 import { useApi } from '../../contexts/AuthContext';
 import { SettingCard, SettingInput, SettingToggle } from '../../components/admin/SettingCard';
+import { getChangedSettings, type SettingsMap } from '../../utils/settingsDiff';
 
 const notificationTabValues = ['settings', 'offline', 'expiry', 'load'] as const;
 type NotificationTab = typeof notificationTabValues[number];
+const emptyTabState: Record<NotificationTab, boolean> = {
+  settings: false,
+  offline: false,
+  expiry: false,
+  load: false,
+};
+const sensitiveNotificationSettingKeys = ['telegram_bot_token', 'telegram_chat_id'] as const;
+type SensitiveNotificationSettingKey = typeof sensitiveNotificationSettingKeys[number];
 
 function toNotificationTab(value?: string): NotificationTab {
   return notificationTabValues.includes(value as NotificationTab) ? value as NotificationTab : 'settings';
+}
+
+function isSensitiveSettingConfigured(settings: SettingsMap, key: SensitiveNotificationSettingKey) {
+  return settings[`${key}_configured`] === 'true';
 }
 
 export default function AdminNotifications() {
   const apiFetch = useApi();
   const navigate = useNavigate();
   const { tab: urlTab } = useParams<{ tab?: string }>();
-  const [activeTab, setActiveTab] = useState<NotificationTab>(() => toNotificationTab(urlTab));
-  const [loading, setLoading] = useState(true);
+  const initialTab = toNotificationTab(urlTab);
+  const [activeTab, setActiveTab] = useState<NotificationTab>(initialTab);
+  const [tabLoading, setTabLoading] = useState<Record<NotificationTab, boolean>>({
+    ...emptyTabState,
+    [initialTab]: true,
+  });
+  const [loadedTabs, setLoadedTabs] = useState<Record<NotificationTab, boolean>>(emptyTabState);
   const [offlineNotifications, setOfflineNotifications] = useState<any[]>([]);
   const [expiryNotifications, setExpiryNotifications] = useState<any[]>([]);
   const [clients, setClients] = useState<any[]>([]);
   const [loadNotifications, setLoadNotifications] = useState<any[]>([]);
-  const [settings, setSettings] = useState<Record<string, string>>({});
+  const [settings, setSettings] = useState<SettingsMap>({});
+  const [originalSettings, setOriginalSettings] = useState<SettingsMap>({});
   const [settingsSaving, setSettingsSaving] = useState(false);
+  const [clearSensitiveSettings, setClearSensitiveSettings] = useState<Record<string, boolean>>({});
 
   // Offline tab state
   const [searchTerm, setSearchTerm] = useState('');
@@ -57,40 +77,106 @@ export default function AdminNotifications() {
   const handleTabChange = (value: string) => {
     const nextTab = toNotificationTab(value);
     setActiveTab(nextTab);
+    setSelectedClients([]);
     navigate(`/admin/notifications/${nextTab}`);
   };
 
-  const loadData = useCallback(async (showSpinner = false) => {
-    if (showSpinner) setLoading(true);
+  const setTabBusy = useCallback((tab: NotificationTab, busy: boolean) => {
+    setTabLoading((prev) => ({ ...prev, [tab]: busy }));
+  }, []);
+
+  const markTabLoaded = useCallback((tab: NotificationTab) => {
+    setLoadedTabs((prev) => ({ ...prev, [tab]: true }));
+  }, []);
+
+  const loadSettingsTab = useCallback(async (force = false) => {
+    if (!force && loadedTabs.settings) return;
+    setTabBusy('settings', true);
+    try {
+      const settingsData = await apiFetch('/admin/settings?scope=notification');
+      if (settingsData && typeof settingsData === 'object') {
+        const nextSettings = settingsData as SettingsMap;
+        setSettings(nextSettings);
+        setOriginalSettings(nextSettings);
+        setClearSensitiveSettings({});
+      }
+      markTabLoaded('settings');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '通知设置加载失败');
+    } finally {
+      setTabBusy('settings', false);
+    }
+  }, [apiFetch, loadedTabs.settings, markTabLoaded, setTabBusy]);
+
+  const loadOfflineTab = useCallback(async (force = false) => {
+    if (!force && loadedTabs.offline) return;
+    setTabBusy('offline', true);
     const results = await Promise.allSettled([
       apiFetch('/admin/notification/offline'),
+      apiFetch('/admin/clients'),
+    ]);
+    const [offData, clientsData] = results.map((result) => result.status === 'fulfilled' ? result.value : null);
+    if (Array.isArray(offData)) setOfflineNotifications(offData);
+    if (Array.isArray(clientsData)) setClients(clientsData);
+    if (results.some((result) => result.status === 'rejected')) {
+      toast.error('离线通知数据加载失败，请稍后刷新');
+    } else {
+      markTabLoaded('offline');
+    }
+    setTabBusy('offline', false);
+  }, [apiFetch, loadedTabs.offline, markTabLoaded, setTabBusy]);
+
+  const loadExpiryTab = useCallback(async (force = false) => {
+    if (!force && loadedTabs.expiry) return;
+    setTabBusy('expiry', true);
+    const results = await Promise.allSettled([
       apiFetch('/admin/notification/expiry'),
+      apiFetch('/admin/clients'),
+    ]);
+    const [expiryData, clientsData] = results.map((result) => result.status === 'fulfilled' ? result.value : null);
+    if (Array.isArray(expiryData)) setExpiryNotifications(expiryData);
+    if (Array.isArray(clientsData)) setClients(clientsData);
+    if (results.some((result) => result.status === 'rejected')) {
+      toast.error('到期通知数据加载失败，请稍后刷新');
+    } else {
+      markTabLoaded('expiry');
+    }
+    setTabBusy('expiry', false);
+  }, [apiFetch, loadedTabs.expiry, markTabLoaded, setTabBusy]);
+
+  const loadLoadTab = useCallback(async (force = false) => {
+    if (!force && loadedTabs.load) return;
+    setTabBusy('load', true);
+    const results = await Promise.allSettled([
       apiFetch('/admin/notification/load'),
       apiFetch('/admin/clients'),
-      apiFetch('/admin/settings'),
     ]);
-    let failed = 0;
-    const [offData, expiryData, loadRulesData, clientsData, settingsData] = results.map((result) => {
-      if (result.status === 'fulfilled') return result.value;
-      failed += 1;
-      return null;
-    });
-
-    if (Array.isArray(offData)) setOfflineNotifications(offData);
-    if (Array.isArray(expiryData)) setExpiryNotifications(expiryData);
-    if (Array.isArray(loadRulesData)) setLoadNotifications(loadRulesData.map((item: any) => ({
-      ...item,
-      clients: Array.isArray(item.clients) ? item.clients : [],
-    })));
-    if (Array.isArray(clientsData)) setClients(clientsData);
-    if (settingsData && typeof settingsData === 'object') setSettings(settingsData as Record<string, string>);
-    if (failed > 0) {
-      toast.error(`${failed} 个通知数据接口加载失败，请稍后刷新`);
+    const [loadRulesData, clientsData] = results.map((result) => result.status === 'fulfilled' ? result.value : null);
+    if (Array.isArray(loadRulesData)) {
+      setLoadNotifications(loadRulesData.map((item: any) => ({
+        ...item,
+        clients: Array.isArray(item.clients) ? item.clients : [],
+      })));
     }
-    setLoading(false);
-  }, [apiFetch]);
+    if (Array.isArray(clientsData)) setClients(clientsData);
+    if (results.some((result) => result.status === 'rejected')) {
+      toast.error('负载通知数据加载失败，请稍后刷新');
+    } else {
+      markTabLoaded('load');
+    }
+    setTabBusy('load', false);
+  }, [apiFetch, loadedTabs.load, markTabLoaded, setTabBusy]);
 
-  useEffect(() => { loadData(true); }, [loadData]);
+  const loadActiveTab = useCallback((tab: NotificationTab, force = false) => {
+    if (tab === 'settings') return loadSettingsTab(force);
+    if (tab === 'offline') return loadOfflineTab(force);
+    if (tab === 'expiry') return loadExpiryTab(force);
+    return loadLoadTab(force);
+  }, [loadExpiryTab, loadLoadTab, loadOfflineTab, loadSettingsTab]);
+
+  useEffect(() => {
+    void loadActiveTab(activeTab);
+  }, [activeTab, loadActiveTab]);
 
   // ─── Offline: search + filter ───
   const notificationMap = useMemo(() => {
@@ -123,7 +209,7 @@ export default function AdminNotifications() {
     });
     if (result.success) {
       toast.success(enable ? '已开启离线通知' : '已关闭离线通知');
-      loadData();
+      void loadOfflineTab(true);
     } else {
       toast.error('操作失败');
     }
@@ -153,7 +239,7 @@ export default function AdminNotifications() {
     if (result.success) {
       toast.success('已更新');
       setEditDialogOpen(false);
-      loadData();
+      void loadOfflineTab(true);
     } else {
       toast.error('更新失败');
     }
@@ -183,7 +269,7 @@ export default function AdminNotifications() {
       toast.success(`已批量更新 ${selectedClients.length} 个节点`);
       setBatchDialogOpen(false);
       setSelectedClients([]);
-      loadData();
+      void loadOfflineTab(true);
     } else {
       toast.error('批量更新失败');
     }
@@ -205,7 +291,7 @@ export default function AdminNotifications() {
     });
     if (result.success) {
       toast.success(enable ? '已开启到期通知' : '已关闭到期通知');
-      loadData();
+      void loadExpiryTab(true);
     } else {
       toast.error('操作失败');
     }
@@ -234,7 +320,7 @@ export default function AdminNotifications() {
     if (result.success) {
       toast.success('已更新');
       setExpiryEditDialogOpen(false);
-      loadData();
+      void loadExpiryTab(true);
     } else {
       toast.error('更新失败');
     }
@@ -263,7 +349,7 @@ export default function AdminNotifications() {
       toast.success(`已批量更新 ${selectedClients.length} 个节点`);
       setExpiryBatchDialogOpen(false);
       setSelectedClients([]);
-      loadData();
+      void loadExpiryTab(true);
     } else {
       toast.error('批量更新失败');
     }
@@ -272,19 +358,49 @@ export default function AdminNotifications() {
   // ─── Settings: global notification channel ───
   const updateSetting = (key: string, value: string) => {
     setSettings((prev) => ({ ...prev, [key]: value }));
+    if (sensitiveNotificationSettingKeys.includes(key as SensitiveNotificationSettingKey)) {
+      setClearSensitiveSettings((prev) => ({ ...prev, [key]: false }));
+    }
+  };
+
+  const clearSensitiveSetting = (key: SensitiveNotificationSettingKey) => {
+    setSettings((prev) => ({ ...prev, [key]: '' }));
+    setClearSensitiveSettings((prev) => ({ ...prev, [key]: true }));
   };
 
   const saveNotificationSettings = async () => {
+    const payload = { ...settings };
+    const changedSettings: Record<string, string | boolean> = getChangedSettings(payload, originalSettings);
+    for (const key of sensitiveNotificationSettingKeys) {
+      if (clearSensitiveSettings[key]) {
+        changedSettings[`${key}_clear`] = true;
+      }
+    }
+    if (Object.keys(changedSettings).length === 0) {
+      toast.info('没有需要保存的改动');
+      return;
+    }
+
     setSettingsSaving(true);
     try {
       const result = await apiFetch('/admin/settings', {
         method: 'POST',
-        body: JSON.stringify({
-          ...settings,
-          notification_method: 'telegram',
-        }),
+        body: JSON.stringify(changedSettings),
       });
       if (result.success) {
+        const nextSettings: SettingsMap = { ...payload };
+        for (const key of sensitiveNotificationSettingKeys) {
+          if (clearSensitiveSettings[key]) {
+            nextSettings[key] = '';
+            nextSettings[`${key}_configured`] = 'false';
+          } else if (typeof changedSettings[key] === 'string' && changedSettings[key]) {
+            nextSettings[key] = '';
+            nextSettings[`${key}_configured`] = 'true';
+          }
+        }
+        setSettings(nextSettings);
+        setOriginalSettings(nextSettings);
+        setClearSensitiveSettings({});
         toast.success('通知设置已保存');
       } else {
         toast.error(result.error || '保存失败');
@@ -334,7 +450,7 @@ export default function AdminNotifications() {
       if (result.success) {
         toast.success('已更新');
         setLoadDialogOpen(false);
-        loadData();
+        void loadLoadTab(true);
       } else {
         toast.error('更新失败');
       }
@@ -346,7 +462,7 @@ export default function AdminNotifications() {
       if (result.success) {
         toast.success('已添加');
         setLoadDialogOpen(false);
-        loadData();
+        void loadLoadTab(true);
       } else {
         toast.error('添加失败');
       }
@@ -359,7 +475,7 @@ export default function AdminNotifications() {
     });
     if (result.success) {
       toast.success('已删除');
-      loadData();
+      void loadLoadTab(true);
     } else {
       toast.error('删除失败');
     }
@@ -382,19 +498,21 @@ export default function AdminNotifications() {
     }
   };
 
-  if (loading) return <Loading />;
-
   const offlineStatsCount = offlineNotifications.filter((n: any) => n.enable).length;
   const expiryStatsCount = expiryNotifications.filter((n: any) => n.enable).length;
+  const telegramTokenConfigured = isSensitiveSettingConfigured(settings, 'telegram_bot_token')
+    && !clearSensitiveSettings.telegram_bot_token;
+  const telegramChatConfigured = isSensitiveSettingConfigured(settings, 'telegram_chat_id')
+    && !clearSensitiveSettings.telegram_chat_id;
   const headerAction = activeTab === 'settings' ? (
-    <Button onClick={saveNotificationSettings} disabled={settingsSaving}>
-      <Save size={14} /> {settingsSaving ? '保存中...' : '保存设置'}
+    <Button onClick={saveNotificationSettings} disabled={settingsSaving || tabLoading.settings}>
+      <Save size={14} /> {settingsSaving ? '保存中…' : '保存设置'}
     </Button>
   ) : activeTab === 'offline' ? (
     <Button
       variant="soft"
       onClick={openBatchDialog}
-      disabled={selectedClients.length === 0}
+      disabled={tabLoading.offline || selectedClients.length === 0}
     >
       <Pencil size={14} /> 批量编辑 ({selectedClients.length})
     </Button>
@@ -402,12 +520,12 @@ export default function AdminNotifications() {
     <Button
       variant="soft"
       onClick={openExpiryBatchDialog}
-      disabled={selectedClients.length === 0}
+      disabled={tabLoading.expiry || selectedClients.length === 0}
     >
       <Pencil size={14} /> 批量编辑 ({selectedClients.length})
     </Button>
   ) : (
-    <Button onClick={openLoadAdd}><Plus size={14} /> 新建规则</Button>
+    <Button onClick={openLoadAdd} disabled={tabLoading.load}><Plus size={14} /> 新建规则</Button>
   );
 
   return (
@@ -426,13 +544,13 @@ export default function AdminNotifications() {
               <Bell size={14} /> 通知设置
             </Tabs.Trigger>
             <Tabs.Trigger value="offline">
-              <Unplug size={14} /> 离线通知 ({offlineStatsCount} 开启)
+              <Unplug size={14} /> {loadedTabs.offline ? `离线通知 (${offlineStatsCount} 开启)` : '离线通知'}
             </Tabs.Trigger>
             <Tabs.Trigger value="expiry">
-              <CalendarClock size={14} /> 到期通知 ({expiryStatsCount} 开启)
+              <CalendarClock size={14} /> {loadedTabs.expiry ? `到期通知 (${expiryStatsCount} 开启)` : '到期通知'}
             </Tabs.Trigger>
             <Tabs.Trigger value="load">
-              <TrendingUp size={14} /> 负载通知 ({loadNotifications.length} 条)
+              <TrendingUp size={14} /> {loadedTabs.load ? `负载通知 (${loadNotifications.length} 条)` : '负载通知'}
             </Tabs.Trigger>
           </Tabs.List>
           <Flex className="admin-subnav-actions" align="center" gap="2">{headerAction}</Flex>
@@ -441,56 +559,99 @@ export default function AdminNotifications() {
         <Box>
           {/* ─── Settings Tab ─── */}
           <Tabs.Content value="settings">
-            <SettingCard title="Telegram 通知" description="配置 Telegram Bot 作为通知通道" defaultOpen>
-              <SettingInput
-                label="Bot Token"
-                description="从 @BotFather 获取的 Telegram Bot Token"
-                value={settings.telegram_bot_token || ''}
-                onChange={(value) => updateSetting('telegram_bot_token', value)}
-                placeholder="123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
-              />
-              <SettingInput
-                label="Chat ID"
-                description="接收通知的 Telegram 群组或用户 Chat ID"
-                value={settings.telegram_chat_id || ''}
-                onChange={(value) => updateSetting('telegram_chat_id', value)}
-                placeholder="-1001234567890"
-              />
-              <SettingToggle
-                label="IP 变更通知"
-                description="服务器 IPv4 / IPv6 发生变化时发送 Telegram 通知"
-                checked={settings.enable_ip_change_notification === 'true'}
-                onCheckedChange={(checked) => updateSetting('enable_ip_change_notification', checked ? 'true' : 'false')}
-              />
-              <SettingToggle
-                label="从未上报节点告警"
-                description="节点创建超过宽限期但仍没有任何上报记录时发送离线通知"
-                checked={settings.offline_notify_never_reported !== 'false'}
-                onCheckedChange={(checked) => updateSetting('offline_notify_never_reported', checked ? 'true' : 'false')}
-              />
-            </SettingCard>
+            {tabLoading.settings ? (
+              <Loading />
+            ) : (
+              <>
+                <SettingCard title="Telegram 通知" description="配置 Telegram Bot 作为通知通道" defaultOpen>
+                  <Flex align="end" gap="2" wrap="wrap" mb="2">
+                    <Box style={{ flex: '1 1 360px' }}>
+                      <SettingInput
+                        label="Bot Token"
+                        description={telegramTokenConfigured ? '已保存，留空不修改' : '从 @BotFather 获取的 Telegram Bot Token'}
+                        value={settings.telegram_bot_token || ''}
+                        onChange={(value) => updateSetting('telegram_bot_token', value)}
+                        type="password"
+                        placeholder={telegramTokenConfigured ? '已配置' : '123456789:ABCdefGHIjklMNOpqrsTUVwxyz'}
+                      />
+                    </Box>
+                    {telegramTokenConfigured && <Badge color="green" variant="soft">已配置</Badge>}
+                    {(telegramTokenConfigured || clearSensitiveSettings.telegram_bot_token) && (
+                      <Button
+                        size="1"
+                        variant="soft"
+                        color={clearSensitiveSettings.telegram_bot_token ? 'gray' : 'red'}
+                        onClick={() => clearSensitiveSetting('telegram_bot_token')}
+                        disabled={Boolean(clearSensitiveSettings.telegram_bot_token)}
+                      >
+                        {clearSensitiveSettings.telegram_bot_token ? '待清除' : '清除'}
+                      </Button>
+                    )}
+                  </Flex>
+                  <Flex align="end" gap="2" wrap="wrap" mb="2">
+                    <Box style={{ flex: '1 1 360px' }}>
+                      <SettingInput
+                        label="Chat ID"
+                        description={telegramChatConfigured ? '已保存，留空不修改' : '接收通知的 Telegram 群组或用户 Chat ID'}
+                        value={settings.telegram_chat_id || ''}
+                        onChange={(value) => updateSetting('telegram_chat_id', value)}
+                        placeholder={telegramChatConfigured ? '已配置' : '-1001234567890'}
+                      />
+                    </Box>
+                    {telegramChatConfigured && <Badge color="green" variant="soft">已配置</Badge>}
+                    {(telegramChatConfigured || clearSensitiveSettings.telegram_chat_id) && (
+                      <Button
+                        size="1"
+                        variant="soft"
+                        color={clearSensitiveSettings.telegram_chat_id ? 'gray' : 'red'}
+                        onClick={() => clearSensitiveSetting('telegram_chat_id')}
+                        disabled={Boolean(clearSensitiveSettings.telegram_chat_id)}
+                      >
+                        {clearSensitiveSettings.telegram_chat_id ? '待清除' : '清除'}
+                      </Button>
+                    )}
+                  </Flex>
+                  <SettingToggle
+                    label="IP 变更通知"
+                    description="服务器 IPv4 / IPv6 发生变化时发送 Telegram 通知"
+                    checked={settings.enable_ip_change_notification === 'true'}
+                    onCheckedChange={(checked) => updateSetting('enable_ip_change_notification', checked ? 'true' : 'false')}
+                  />
+                  <SettingToggle
+                    label="从未上报节点告警"
+                    description="节点创建超过宽限期但仍没有任何上报记录时发送离线通知"
+                    checked={settings.offline_notify_never_reported !== 'false'}
+                    onCheckedChange={(checked) => updateSetting('offline_notify_never_reported', checked ? 'true' : 'false')}
+                  />
+                </SettingCard>
 
-            <Card style={{ padding: 16 }}>
-              <Flex justify="between" align="center" gap="3" wrap="wrap">
-                <Box>
-                  <Text size="3" weight="bold">测试通知</Text>
-                  <Text size="1" color="gray" style={{ display: 'block', marginTop: 2 }}>
-                    验证 Telegram 通知配置是否可用
-                  </Text>
-                </Box>
-                <Button variant="soft" onClick={sendTestMessage}>
-                  <Send size={16} /> 发送测试消息
-                </Button>
-              </Flex>
-            </Card>
+                <Card style={{ padding: 16 }}>
+                  <Flex justify="between" align="center" gap="3" wrap="wrap">
+                    <Box>
+                      <Text size="3" weight="bold">测试通知</Text>
+                      <Text size="1" color="gray" style={{ display: 'block', marginTop: 2 }}>
+                        验证 Telegram 通知配置是否可用
+                      </Text>
+                    </Box>
+                    <Button variant="soft" onClick={sendTestMessage}>
+                      <Send size={16} /> 发送测试消息
+                    </Button>
+                  </Flex>
+                </Card>
+              </>
+            )}
           </Tabs.Content>
 
           {/* ─── Offline Tab ─── */}
           <Tabs.Content value="offline">
+            {tabLoading.offline ? (
+              <Loading />
+            ) : (
+              <>
             <Flex justify="between" align="center" mb="3" gap="2" wrap="wrap">
               <TextField.Root
                 style={{ width: 280 }}
-                placeholder="搜索服务器名称、IP、地区..."
+                placeholder="搜索服务器名称、IP、地区…"
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
               >
@@ -575,14 +736,20 @@ export default function AdminNotifications() {
               </Table.Root>
               </div>
             )}
+              </>
+            )}
           </Tabs.Content>
 
           {/* ─── Expiry Tab ─── */}
           <Tabs.Content value="expiry">
+            {tabLoading.expiry ? (
+              <Loading />
+            ) : (
+              <>
             <Flex justify="between" align="center" mb="3" gap="2" wrap="wrap">
               <TextField.Root
                 style={{ width: 280 }}
-                placeholder="搜索服务器名称、IP、地区..."
+                placeholder="搜索服务器名称、IP、地区…"
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
               >
@@ -674,11 +841,15 @@ export default function AdminNotifications() {
               </Table.Root>
               </div>
             )}
+              </>
+            )}
           </Tabs.Content>
 
           {/* ─── Load Tab ─── */}
           <Tabs.Content value="load">
-            {loadNotifications.length === 0 ? (
+            {tabLoading.load ? (
+              <Loading />
+            ) : loadNotifications.length === 0 ? (
               <Flex justify="center" py="6" direction="column" align="center" gap="2">
                 <TrendingUp size={32} color="var(--gray-6)" />
                 <Text color="gray">暂无负载通知规则</Text>

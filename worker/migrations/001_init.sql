@@ -182,7 +182,7 @@ CREATE TABLE IF NOT EXISTS load_notifications (
 -- 审计日志表
 CREATE TABLE IF NOT EXISTS audit_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    time TEXT DEFAULT (datetime('now')),
+    time TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     user TEXT DEFAULT '',
     action TEXT DEFAULT '',
     detail TEXT DEFAULT '',

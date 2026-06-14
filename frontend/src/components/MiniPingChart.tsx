@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Box, Flex, Text } from '@radix-ui/themes';
 import {
   CartesianGrid,
@@ -85,7 +85,7 @@ export default function MiniPingChart({
   if (loading) {
     return (
       <Flex align="center" justify="center" style={{ width: contentWidth, height }}>
-        <Text size="2" color="gray">加载 Ping 数据...</Text>
+        <Text size="2" color="gray">加载 Ping 数据…</Text>
       </Flex>
     );
   }
@@ -206,7 +206,7 @@ export default function MiniPingChart({
                     flexShrink: 0,
                   }}
                 />
-                <Text size="1" weight="bold" truncate className="mini-ping-chart-legend-name" style={{ color: item.task.color }}>
+                <Text size="1" weight="bold" truncate className="mini-ping-chart-legend-name" style={{ color: 'var(--gray-12)' }}>
                   {item.task.label}
                 </Text>
               </Flex>

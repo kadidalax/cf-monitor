@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Flex, Card, Text, Heading, Button, TextField, Tabs } from '@radix-ui/themes';
 import { Save, User } from 'lucide-react';
 import { toast } from 'sonner';
@@ -122,7 +122,7 @@ export default function AdminAccount() {
               onClick={handleChangeUsername}
               disabled={savingUsername || username.trim() === (user?.username || '')}
             >
-              <Save size={16} /> {savingUsername ? '保存中...' : '修改用户名'}
+              <Save size={16} /> {savingUsername ? '保存中…' : '修改用户名'}
             </Button>
           </Flex>
         </Card>
@@ -161,7 +161,7 @@ export default function AdminAccount() {
               />
             </label>
             <Button onClick={handleChangePassword} disabled={saving}>
-              <Save size={16} /> {saving ? '保存中...' : '修改密码'}
+              <Save size={16} /> {saving ? '保存中…' : '修改密码'}
             </Button>
           </Flex>
         </Card>

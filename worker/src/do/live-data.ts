@@ -43,6 +43,7 @@ const RECORD_CAPACITY_CACHE_NEAR_MS = 10 * 60_000;
 const RECORD_CAPACITY_CACHE_CRITICAL_MS = 60_000;
 const RECORD_CAPACITY_AUDIT_THROTTLE_MS = 10 * 60 * 1000;
 const HOT_PATH_HEALTH_OK_THROTTLE_MS = 10 * 60 * 1000;
+const LAST_SEEN_UPDATE_INTERVAL_MS = 30_000;
 const POLICY_SETTING_CACHE_MS = 5_000;
 const PING_TASK_CACHE_MS = 30_000;
 const AGENT_POLICY_SETTING_KEYS = [
@@ -114,8 +115,6 @@ export class LiveDataDO {
   private sessionRoles: Map<string, SessionRole>;
   private viewerExpiresAt: Map<string, number>;
   private clients: Map<string, ClientState>; // 在线客户端状态
-  private lastCacheTime: number = 0;
-  private cachedData: any = null;
   private recordPersistenceEnabled: boolean = true;
   private recordPersistIntervalMs: number = RECORD_PERSIST_INTERVAL_MS;
   private pingRecordPersistIntervalMs: number = PING_RECORD_PERSIST_INTERVAL_MS;
@@ -127,6 +126,7 @@ export class LiveDataDO {
   private recordCapacityLastAuditAt: number = 0;
   private healthOkLastWriteAt: Map<string, number> = new Map();
   private recordLastPersistAt: Map<string, number> = new Map();
+  private lastSeenLastWriteAt: Map<string, number> = new Map();
   private policySettings: AgentPolicySettings = {
     activeIntervalSec: 3,
     idleIntervalSec: 600,
@@ -167,6 +167,18 @@ export class LiveDataDO {
         ? value.viewerExpiresAt
         : undefined,
     };
+  }
+
+  private runBackground(task: Promise<unknown>): void {
+    const guarded = task.catch((error) => {
+      console.error('[live-data-do] background task failed:', errorDetail(error));
+    });
+    const state = this.state as DurableObjectState & { waitUntil?: (promise: Promise<unknown>) => void };
+    if (typeof state.waitUntil === 'function') {
+      state.waitUntil(guarded);
+      return;
+    }
+    void guarded;
   }
 
   private registerSession(ws: WebSocket, attachment: SessionAttachment): void {
@@ -227,16 +239,6 @@ export class LiveDataDO {
     };
   }
 
-  private cacheSnapshot(now: number) {
-    const snapshot = this.buildSnapshot();
-    this.lastCacheTime = now;
-    this.cachedData = {
-      online: snapshot.online,
-      clientCount: snapshot.count,
-      timestamp: now,
-    };
-  }
-
   private sendSnapshot(ws: WebSocket) {
     if (ws.readyState !== WebSocket.READY_STATE_OPEN) return;
     try {
@@ -291,7 +293,6 @@ export class LiveDataDO {
       });
     }
 
-    this.cacheSnapshot(now);
     return report;
   }
 
@@ -424,13 +425,11 @@ export class LiveDataDO {
   }
 
   private removeExpiredClients(now: number) {
-    let removed = false;
     for (const [uuid, client] of this.clients) {
       if (!client.expiresAt || client.expiresAt > now) continue;
 
       const wasVisible = !client.hidden;
       this.clients.delete(uuid);
-      removed = true;
       if (wasVisible) {
         this.broadcastToViewers({
           type: 'remove',
@@ -438,10 +437,6 @@ export class LiveDataDO {
           timestamp: now,
         });
       }
-    }
-
-    if (removed) {
-      this.cacheSnapshot(now);
     }
   }
 
@@ -610,6 +605,41 @@ export class LiveDataDO {
     }
   }
 
+  private async cleanupClientStorage(clientId: string): Promise<number> {
+    const keys = [`record:persist:${clientId}`];
+    this.recordLastPersistAt.delete(clientId);
+    this.lastSeenLastWriteAt.delete(clientId);
+
+    try {
+      const pingEntries = await this.state.storage.list<number>({
+        prefix: `${PING_RESULT_STORAGE_PREFIX}${clientId}:`,
+      });
+      keys.push(...pingEntries.keys());
+      await Promise.all(keys.map(key => this.state.storage.delete(key)));
+      return keys.length;
+    } catch {
+      return 0;
+    }
+  }
+
+  private async cleanupPingTaskStorage(taskIds: number[]): Promise<number> {
+    const taskIdSet = new Set(taskIds.filter(id => Number.isInteger(id) && id > 0).map(String));
+    if (taskIdSet.size === 0) return 0;
+
+    try {
+      const entries = await this.state.storage.list<number>({ prefix: PING_RESULT_STORAGE_PREFIX });
+      const keys: string[] = [];
+      for (const key of entries.keys()) {
+        const taskId = key.slice(key.lastIndexOf(':') + 1);
+        if (taskIdSet.has(taskId)) keys.push(key);
+      }
+      await Promise.all(keys.map(key => this.state.storage.delete(key)));
+      return keys.length;
+    } catch {
+      return 0;
+    }
+  }
+
   private expireViewer(id: string, session: WebSocket, now: number): void {
     this.viewerExpiresAt.delete(id);
     if (this.sessions.get(id) === session) {
@@ -728,6 +758,7 @@ export class LiveDataDO {
     this.sessions.delete(meta.uuid);
     this.sessionRoles.delete(meta.uuid);
     this.clients.delete(meta.uuid);
+    const cleanedStorageKeys = await this.cleanupClientStorage(meta.uuid);
     if (wasVisible) {
       this.broadcastToViewers({
         type: 'remove',
@@ -736,7 +767,7 @@ export class LiveDataDO {
       });
     }
 
-    return new Response(JSON.stringify({ success: true }), {
+    return new Response(JSON.stringify({ success: true, cleaned_storage_keys: cleanedStorageKeys }), {
       headers: { 'Content-Type': 'application/json' },
     });
   }
@@ -828,8 +859,13 @@ export class LiveDataDO {
     }
 
     if (request.method === 'POST' && url.pathname === '/ping-tasks-refresh') {
+      const payload = await request.json().catch(() => null) as any;
+      const removedTaskIds = Array.isArray(payload?.removed_task_ids)
+        ? payload.removed_task_ids.map(Number).filter((id: number) => Number.isInteger(id) && id > 0)
+        : [];
+      const cleanedStorageKeys = await this.cleanupPingTaskStorage(removedTaskIds);
       this.invalidatePingTasksCache();
-      return Response.json({ success: true });
+      return Response.json({ success: true, cleaned_storage_keys: cleanedStorageKeys });
     }
 
     if (request.method === 'GET' && url.pathname === '/policy') {
@@ -907,24 +943,28 @@ export class LiveDataDO {
   private async handleMessage(clientId: string, clientName: string, hidden: boolean, data: any, ws: WebSocket) {
     const now = Date.now();
     if (data?.type === 'ping_result') {
-      void this.persistPingResult(clientId, data, now);
+      this.runBackground(this.markClientSeen(clientId, now, 'ws-ping'));
+      this.runBackground(this.persistPingResult(clientId, data, now));
       return;
     }
 
     if (data?.type === 'reports' && Array.isArray(data.reports)) {
       const reports = data.reports.slice(0, 1200);
       const reportsToPersist: Array<{ report: any; reportTime: number }> = [];
+      let lastReportIntervalSec: number | null = null;
       for (let index = 0; index < reports.length; index += 1) {
         const rawReport = reports[index];
         const reportTime = this.reportTimestamp(rawReport, now);
         const isLast = index === reports.length - 1;
         if (isLast) {
           const report = this.updateClientReport(clientId, clientName, hidden, rawReport, reportTime);
+          lastReportIntervalSec = Number(report.report_interval || 0) || null;
           reportsToPersist.push({ report, reportTime });
         } else {
           reportsToPersist.push({ report: rawReport, reportTime });
         }
       }
+      this.runBackground(this.markClientSeen(clientId, now, 'ws', false, false, lastReportIntervalSec));
 
       if (ws.readyState === WebSocket.READY_STATE_OPEN) {
         try {
@@ -933,11 +973,12 @@ export class LiveDataDO {
           // 忽略 ack 发送错误
         }
       }
-      void this.persistReportsSequential(clientId, reportsToPersist);
+      this.runBackground(this.persistReportsSequential(clientId, reportsToPersist));
       return;
     }
 
     const report = this.updateClientReport(clientId, clientName, hidden, data, now);
+    this.runBackground(this.markClientSeen(clientId, now, 'ws', false, false, report.report_interval));
 
     if (ws.readyState === WebSocket.READY_STATE_OPEN) {
       try {
@@ -948,7 +989,7 @@ export class LiveDataDO {
     }
 
     // 持久化放在实时响应之后，避免 D1 写入延迟阻塞 Agent WebSocket ack。
-    void this.persistReport(clientId, report, now);
+    this.runBackground(this.persistReport(clientId, report, now));
   }
 
   async webSocketMessage(ws: WebSocket, message: ArrayBuffer | string): Promise<void> {
@@ -996,23 +1037,25 @@ export class LiveDataDO {
     await this.scheduleExpiryAlarm(now);
   }
 
-  private async isPersistDue(clientId: string, now: number): Promise<boolean> {
+  private async reservePersistSlot(clientId: string, now: number): Promise<boolean> {
     const storageKey = `record:persist:${clientId}`;
     let lastPersist = this.recordLastPersistAt.get(clientId);
     if (lastPersist === undefined) {
-      lastPersist = Number(await this.state.storage.get<number>(storageKey) || 0);
+      const storedLastPersist = Number(await this.state.storage.get<number>(storageKey) || 0);
+      lastPersist = this.recordLastPersistAt.get(clientId) ?? storedLastPersist;
       this.recordLastPersistAt.set(clientId, lastPersist);
     }
     if (now - lastPersist < this.recordPersistIntervalMs) {
       return false;
     }
-    return true;
-  }
-
-  private async markPersistAttempt(clientId: string, now: number): Promise<void> {
-    const storageKey = `record:persist:${clientId}`;
     this.recordLastPersistAt.set(clientId, now);
-    await this.state.storage.put(storageKey, now);
+    try {
+      await this.state.storage.put(storageKey, now);
+    } catch (error) {
+      this.recordLastPersistAt.set(clientId, lastPersist);
+      throw error;
+    }
+    return true;
   }
 
   private async persistReportsSequential(
@@ -1087,7 +1130,8 @@ export class LiveDataDO {
     }
 
     try {
-      const counts = await db.getHistoryStorageRowCounts(this.env.DB);
+      // 使用快速计数（增量计数表），避免全表扫描
+      const counts = await db.getHistoryStorageRowCountsFast(this.env.DB);
       this.recordCapacityRows = counts.records + counts.gpu_records + counts.gpu_snapshots + counts.ping_records + counts.ping_snapshots;
       this.recordCapacityBlocked = this.recordCapacityRows >= this.recordHighWatermarkRows;
       this.recordCapacityNextCheckAt = now + this.capacityCheckDelayMs();
@@ -1125,27 +1169,45 @@ export class LiveDataDO {
     });
   }
 
+  private async markClientSeen(
+    clientId: string,
+    nowMs: number,
+    source: string,
+    persisted = false,
+    force = false,
+    reportIntervalSec?: number | null,
+  ): Promise<void> {
+    if (!this.env?.DB) return;
+    const previous = this.lastSeenLastWriteAt.get(clientId) || 0;
+    if (!force && !persisted && nowMs - previous < LAST_SEEN_UPDATE_INTERVAL_MS) return;
+    this.lastSeenLastWriteAt.set(clientId, nowMs);
+    const seenAt = new Date(nowMs).toISOString();
+    try {
+      await db.markClientSeen(this.env.DB, clientId, seenAt, source, persisted ? seenAt : null, reportIntervalSec);
+    } catch {
+      // Last-seen updates must never block realtime delivery.
+    }
+  }
+
   private async persistReport(clientId: string, report: any, nowMs: number, force = false): Promise<boolean> {
     if (!this.env?.DB || !report || report.type === 'ping' || report.type === 'pong' || report.type === 'ping_result') {
       return false;
     }
 
-    if (!force && !(await this.isPersistDue(clientId, nowMs))) {
-      return false;
-    }
-
-    if (!(await this.isRecordPersistenceEnabled(nowMs))) {
-      return false;
-    }
-
-    if (!(await this.canPersistWithinCapacity(nowMs))) {
-      return false;
-    }
-
-    if (!force) await this.markPersistAttempt(clientId, nowMs);
-
-    const time = new Date(nowMs).toISOString();
     try {
+      if (!(await this.isRecordPersistenceEnabled(nowMs))) {
+        return false;
+      }
+
+      if (!force && !(await this.reservePersistSlot(clientId, nowMs))) {
+        return false;
+      }
+
+      if (!(await this.canPersistWithinCapacity(nowMs))) {
+        return false;
+      }
+
+      const time = new Date(nowMs).toISOString();
       const record = toMonitorRecord(clientId, time, report);
       await this.env.DB.prepare(
         'INSERT INTO records (client, time, cpu, gpu, ram, ram_total, swap, swap_total, load, temp, disk, disk_total, net_in, net_out, net_total_up, net_total_down, process_count, connections, connections_udp, uptime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
@@ -1180,6 +1242,7 @@ export class LiveDataDO {
         `record persisted for ${clientId}`,
         nowMs,
       );
+      await this.markClientSeen(clientId, nowMs, 'history', true, true, report.report_interval);
       return true;
     } catch (error) {
       await bestEffortRecordHealthEvent(
@@ -1210,6 +1273,7 @@ export class LiveDataDO {
 
       const time = new Date(nowMs).toISOString();
       await db.insertPingSnapshot(this.env.DB, clientId, time, accepted);
+      await this.markClientSeen(clientId, nowMs, 'ping', true, true);
       await this.recordHotPathHealthOk(
         'ping_persistence',
         `ping result persisted for ${clientId}`,
@@ -1262,6 +1326,7 @@ export class LiveDataDO {
 
       const time = new Date(nowMs).toISOString();
       await db.insertPingSnapshot(this.env.DB, payload.client_id, time, accepted);
+      await this.markClientSeen(payload.client_id, nowMs, 'ping', true, true);
       await this.recordHotPathHealthOk(
         'ping_persistence',
         `ping result persisted for ${payload.client_id}`,
@@ -1280,12 +1345,13 @@ export class LiveDataDO {
     }
   }
 
-  private pingTaskIntervalMs(task: db.PingTask | undefined): number {
-    return this.pingRecordPersistIntervalMs;
-  }
-
-  private pingResultIntervalMs(result: PingPersistenceResult, task: db.PingTask | undefined): number {
-    return this.pingRecordPersistIntervalMs;
+  private pingResultIntervalMs(result: PingPersistenceResult): number {
+    const intervalSec = Number(result.intervalSec);
+    if (!Number.isFinite(intervalSec) || intervalSec <= 0) return this.pingRecordPersistIntervalMs;
+    return Math.min(
+      Math.max(intervalSec * 1000, MIN_PING_RECORD_PERSIST_INTERVAL_MS),
+      MAX_PING_RECORD_PERSIST_INTERVAL_MS,
+    );
   }
 
   private trustedPingResults(input: unknown): PingPersistenceResult[] | null {
@@ -1339,7 +1405,7 @@ export class LiveDataDO {
   ): Promise<PingPersistenceResult[]> {
     const accepted: PingPersistenceResult[] = [];
     for (const result of results) {
-      const minIntervalMs = this.pingResultIntervalMs(result, undefined);
+      const minIntervalMs = this.pingResultIntervalMs(result);
       const key = `${PING_RESULT_STORAGE_PREFIX}${clientId}:${result.taskId}`;
       const lastAcceptedMs = Number(await this.state.storage.get<number>(key) || 0);
       if (lastAcceptedMs && nowMs - lastAcceptedMs < minIntervalMs) {

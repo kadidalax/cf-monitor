@@ -5,6 +5,7 @@ import {
   getNextDisplayTheme,
   normalizeDisplayTheme,
 } from '../utils/displayTheme';
+import { syncThemeColorMeta } from '../utils/themeColorMeta';
 
 interface DisplayThemeContextType {
   displayTheme: DisplayTheme;
@@ -26,6 +27,7 @@ export function useDisplayTheme() {
 
 function applyDisplayTheme(theme: DisplayTheme) {
   document.documentElement.setAttribute('data-monitor-theme', theme);
+  syncThemeColorMeta();
   const setter = (window as any).__setRadixAccentColor;
   if (setter) setter(theme);
 }

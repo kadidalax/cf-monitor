@@ -3,7 +3,7 @@
  * Provides collapsible sections with consistent styling
  */
 import React, { useState } from 'react';
-import { Card, Flex, Text, Switch, TextField, TextArea, IconButton } from '@radix-ui/themes';
+import { Card, Flex, Text, Switch, TextField, TextArea } from '@radix-ui/themes';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 
 /* ========== Collapsible SettingCard ========== */
@@ -18,19 +18,35 @@ export function SettingCard({ title, description, children, defaultOpen = true }
   const [open, setOpen] = useState(defaultOpen);
   return (
     <Card style={{ marginBottom: 12 }}>
-      <Flex
-        align="center"
-        justify="between"
-        style={{ cursor: 'pointer', userSelect: 'none' }}
-        onClick={() => setOpen(!open)}
-      >
-        <Flex direction="column">
-          <Text size="3" weight="bold">{title}</Text>
-          {description && <Text size="1" color="gray">{description}</Text>}
-        </Flex>
-        <IconButton variant="ghost" size="1">
-          {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-        </IconButton>
+      <Flex asChild align="center" justify="between">
+        <button
+          type="button"
+          onClick={() => setOpen(!open)}
+          aria-expanded={open}
+          style={{
+            width: '100%',
+            border: 0,
+            margin: 0,
+            padding: 0,
+            background: 'transparent',
+            color: 'inherit',
+            font: 'inherit',
+            textAlign: 'left',
+            cursor: 'pointer',
+            userSelect: 'none',
+          }}
+        >
+          <Flex direction="column">
+            <Text size="3" weight="bold">{title}</Text>
+            {description && <Text size="1" color="gray">{description}</Text>}
+          </Flex>
+          <span
+            aria-hidden="true"
+            style={{ display: 'inline-flex', alignItems: 'center', color: 'var(--gray-11)' }}
+          >
+            {open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+          </span>
+        </button>
       </Flex>
       {open && (
         <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--gray-4)' }}>

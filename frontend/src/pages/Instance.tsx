@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   Flex, Card, Text, Badge, Heading,
@@ -28,7 +28,7 @@ import {
   PingTaskSeries,
 } from '../utils/pingChart';
 import { buildMonitorChartData, getMonitorChartRenderData } from '../utils/monitorChartData';
-import { monitorYAxisProps, pingYAxisProps, wideYAxisProps } from '../utils/monitorChartAxis';
+import { monitorYAxisProps, monitorYAxisWidth, pingYAxisProps, pingYAxisWidth, wideYAxisProps } from '../utils/monitorChartAxis';
 
 const formatSpeed = (bytes: number): string => {
   if (!bytes || bytes === 0) return '0 B/s';
@@ -66,6 +66,10 @@ const timeRangePointLimit: Record<TimeRange, number> = {
 };
 
 const monitorChartMargin = { top: 12, right: 16, bottom: 4, left: 4 };
+const pingChartMargin = {
+  ...monitorChartMargin,
+  left: monitorChartMargin.left - (pingYAxisWidth - monitorYAxisWidth),
+};
 const monitorChartHeight = 296;
 const pingChartHeight = 210;
 interface ClientInfo {
@@ -133,7 +137,7 @@ export default function Instance() {
   const [pingLoading, setPingLoading] = useState(false);
   const [pingError, setPingError] = useState<string | null>(null);
   const [gpuRecords, setGpuRecords] = useState<any[]>([]);
-  const { liveData } = useLiveData();
+  const { liveData, viewerExpired } = useLiveData();
   const liveRecord = uuid ? liveData?.data?.[uuid] : undefined;
   const liveOnline = Boolean(uuid && liveData?.online?.includes(uuid));
   const onlineSet = useMemo(() => new Set(liveData?.online || []), [liveData?.online]);
@@ -161,6 +165,29 @@ export default function Instance() {
       .map(([group, nodes]) => ({ group, nodes }));
   }, [clients, onlineSet]);
 
+  // FE-1: Show viewer expired banner
+  if (viewerExpired) {
+    return (
+      <div className="container mx-auto px-4 py-8">
+        <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-6 text-center">
+          <h2 className="text-xl font-semibold text-yellow-900 dark:text-yellow-100 mb-2">
+            查看会话已过期
+          </h2>
+          <p className="text-yellow-700 dark:text-yellow-300 mb-4">
+            实时数据推送已停止，请刷新页面重新连接
+          </p>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="px-6 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-md transition-colors"
+          >
+            刷新页面
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   // Load public client info.
   const loadClient = useCallback(async () => {
     if (!uuid) return;
@@ -179,7 +206,7 @@ export default function Instance() {
   useEffect(() => { loadClient(); }, [loadClient]);
 
   // Load history records
-  const loadRecords = useCallback(async (range: TimeRange) => {
+  const loadRecords = useCallback(async (range: TimeRange, signal?: AbortSignal) => {
     if (!uuid) return;
     setRecordsLoading(true);
     const endTs = Date.now();
@@ -189,14 +216,27 @@ export default function Instance() {
     const limit = timeRangePointLimit[range];
 
     try {
-      const data = await publicFetch(`/records/load?uuid=${uuid}&start=${start}&end=${end}&limit=${limit}`);
-      setRecords(normalizeListResponse<RecordData>(data));
-    } catch {}
-    setRecordsLoading(false);
+      const res = await fetch(`/api/records/load?uuid=${uuid}&start=${start}&end=${end}&limit=${limit}`, { signal });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (!signal?.aborted) {
+        setRecords(normalizeListResponse<RecordData>(data));
+      }
+    } catch (error) {
+      // Ignore AbortError on intentional cancellation
+      if (signal?.aborted) return;
+    } finally {
+      if (!signal?.aborted) {
+        setRecordsLoading(false);
+      }
+    }
   }, [uuid]);
 
+  // FE-5: Add AbortController to cancel stale requests when timeRange changes
   useEffect(() => {
-    loadRecords(timeRange);
+    const controller = new AbortController();
+    loadRecords(timeRange, controller.signal);
+    return () => controller.abort();
   }, [loadRecords, timeRange]);
 
   // Load ping tasks and records for the current node.
@@ -225,16 +265,28 @@ export default function Instance() {
   }, [uuid]);
 
   // Load GPU records (only for GPU-capable clients)
+  // FE-5: Add AbortController to cancel stale requests
   useEffect(() => {
     if (!uuid || !client?.gpu_name) return;
+    const controller = new AbortController();
     const endTs = Date.now();
     const startTs = endTs - timeRangeMs[timeRange];
     const start = new Date(startTs).toISOString();
     const end = new Date(endTs).toISOString();
 
-    publicFetch(`/records/gpu?uuid=${uuid}&start=${start}&end=${end}&limit=200`)
-      .then((data) => setGpuRecords(normalizeListResponse<any>(data)))
-      .catch(() => {});
+    fetch(`/api/records/gpu?uuid=${uuid}&start=${start}&end=${end}&limit=200`, { signal: controller.signal })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (!controller.signal.aborted) {
+          setGpuRecords(normalizeListResponse<any>(data));
+        }
+      })
+      .catch(() => {
+        // Ignore AbortError on intentional cancellation
+      });
+
+    return () => controller.abort();
   }, [uuid, timeRange, client?.gpu_name]);
 
   // Real-time refresh comes from LiveDataContext, so the detail page does not
@@ -326,6 +378,7 @@ export default function Instance() {
             size="1"
             color={autoRefresh ? 'green' : 'gray'}
             onClick={() => setAutoRefresh(!autoRefresh)}
+            aria-label={autoRefresh ? '暂停自动刷新' : '开启自动刷新'}
             title={autoRefresh ? '暂停自动刷新' : '开启自动刷新'}
           >
             {autoRefresh ? <RefreshCw size={14} /> : <Pause size={14} />}
@@ -540,7 +593,7 @@ export default function Instance() {
         ) : (
           <>
             <ResponsiveContainer width="100%" height={pingChartHeight}>
-              <LineChart data={pingChartRows} margin={monitorChartMargin}>
+              <LineChart data={pingChartRows} margin={pingChartMargin}>
                 <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.3} />
                 <XAxis
                   dataKey="time"
@@ -606,7 +659,7 @@ export default function Instance() {
                           flexShrink: 0,
                         }}
                       />
-                      <Text size="1" weight="bold" truncate style={{ color: item.task.color }}>
+                      <Text size="1" weight="bold" truncate style={{ color: 'var(--gray-12)' }}>
                         {item.task.label}
                       </Text>
                     </Flex>
@@ -671,6 +724,7 @@ function InstanceNodeSidebar({
                       className={`instance-sidebar-node${isActive ? ' is-active' : ''}`}
                       onClick={() => onSelect(node.uuid)}
                       title={node.name}
+                      aria-current={isActive ? 'page' : undefined}
                     >
                       <span
                         className={`instance-sidebar-status${isOnline ? ' is-online' : ' is-offline'}`}
@@ -692,14 +746,5 @@ function InstanceNodeSidebar({
         </Flex>
       </Card>
     </aside>
-  );
-}
-
-function InfoRow({ label, value }: { label: string; value: string }) {
-  return (
-    <Flex justify="between" style={{ padding: '6px 0', borderBottom: '1px solid var(--gray-3)' }}>
-      <Text size="1" color="gray">{label}</Text>
-      <Text size="1" style={{ maxWidth: '60%', textAlign: 'right', wordBreak: 'break-all' }}>{value || '-'}</Text>
-    </Flex>
   );
 }

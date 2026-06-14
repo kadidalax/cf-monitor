@@ -117,7 +117,7 @@ export function ApiUnavailableNotice({ error }: { error: string }) {
 }
 
 export default function Index() {
-  const { liveData, loading, error } = useLiveData();
+  const { liveData, loading, error, viewerExpired } = useLiveData();
   const [now, setNow] = useState(Date.now());
   const [clients, setClients] = useState<ClientInfo[]>([]);
   const [clientsLoading, setClientsLoading] = useState(true);
@@ -129,6 +129,28 @@ export default function Index() {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
+
+  // FE-1: Show viewer expired banner
+  if (viewerExpired) {
+    return (
+      <div className="container mx-auto px-4 py-8">
+        <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-6 text-center">
+          <h2 className="text-xl font-semibold text-yellow-900 dark:text-yellow-100 mb-2">
+            查看会话已过期
+          </h2>
+          <p className="text-yellow-700 dark:text-yellow-300 mb-4">
+            实时数据推送已停止，请刷新页面重新连接
+          </p>
+          <button
+            onClick={() => window.location.reload()}
+            className="px-6 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-md transition-colors"
+          >
+            刷新页面
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   // Load client list
   useEffect(() => {

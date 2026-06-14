@@ -157,6 +157,8 @@ export default React.memo(function Flag({ region, size = 20 }: FlagProps) {
       <img
         src={`/assets/flags/${code}.svg`}
         alt={alt}
+        width={pixelSize}
+        height={pixelSize}
         style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
         onError={(event) => {
           event.currentTarget.onerror = null;

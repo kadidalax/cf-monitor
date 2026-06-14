@@ -6,7 +6,7 @@ export const BACKUP_SCHEMA_ID = 'cf-monitor.backup';
 export const ENCRYPTED_BACKUP_SCHEMA_ID = 'cf-monitor.encrypted-backup';
 export const BACKUP_VERSION = '2.0.0';
 export const BACKUP_SCOPE = 'configuration';
-export const BACKUP_SENSITIVE_WARNING = 'This backup may contain client tokens, AutoDiscovery Key, Telegram credentials, and other configuration secrets. Store it securely.';
+export const BACKUP_SENSITIVE_WARNING = 'This backup may contain Agent token hashes, Telegram credentials, and other configuration secrets. Store it securely.';
 export const BACKUP_ENCRYPTION_ALGORITHM = 'AES-GCM';
 export const BACKUP_KDF = 'PBKDF2-SHA256';
 export const BACKUP_KDF_ITERATIONS = 210_000;
@@ -18,6 +18,8 @@ export const BACKUP_EXCLUDED_MODULES = [
   'ping_records',
   'ping_snapshots',
   'audit_logs',
+  'notification_deliveries',
+  'notification_incidents',
 ];
 export const MAX_BACKUP_BYTES = 5 * 1024 * 1024;
 export const MIN_BACKUP_PASSWORD_BYTES = 12;
@@ -25,6 +27,7 @@ export const MIN_BACKUP_PASSWORD_BYTES = 12;
 const MAX_CLIENTS = 1000;
 const MAX_PING_TASKS = 1000;
 const MAX_NOTIFICATIONS = 5000;
+const SHA256_HEX_RE = /^[a-f0-9]{64}$/;
 
 type BackupModuleKey =
   | 'settings'
@@ -42,6 +45,7 @@ export interface BackupData {
   excluded?: string[];
   sensitive?: boolean;
   warning?: string;
+  hmac?: string; // HMAC签名
   settings?: Record<string, string>;
   clients?: Partial<Client>[];
   ping_tasks?: PingTask[];
@@ -279,16 +283,18 @@ function validateClients(items: unknown[], errors: string[]): Partial<Client>[] 
   const clients: Partial<Client>[] = [];
   const uuids = new Set<string>();
   const tokens = new Set<string>();
+  const tokenHashes = new Set<string>();
 
   const stringFields = [
-    'uuid', 'token', 'name', 'cpu_name', 'virtualization', 'arch', 'os',
+    'uuid', 'token', 'token_hash', 'token_prefix', 'name', 'cpu_name', 'virtualization', 'arch', 'os',
     'kernel_version', 'gpu_name', 'ipv4', 'ipv6', 'region', 'remark',
     'public_remark', 'version', 'currency', 'expired_at', 'group', 'tags',
-    'traffic_limit_type', 'created_at', 'updated_at',
+    'traffic_limit_type', 'last_seen_at', 'last_report_source', 'last_report_persisted_at',
+    'created_at', 'updated_at',
   ];
   const numberFields = [
     'cpu_cores', 'mem_total', 'swap_total', 'disk_total', 'price',
-    'billing_cycle', 'traffic_limit', 'sort_order',
+    'billing_cycle', 'traffic_limit', 'sort_order', 'last_report_interval_sec',
   ];
   const booleanFields = ['auto_renewal', 'hidden'];
 
@@ -302,7 +308,7 @@ function validateClients(items: unknown[], errors: string[]): Partial<Client>[] 
     for (const field of stringFields) {
       const text = textField(item[field], `clients[${index}].${field}`, errors, {
         required: field === 'uuid',
-        maxLength: field === 'token' ? 256 : 512,
+        maxLength: field === 'token' ? 256 : field === 'token_hash' ? 64 : field === 'token_prefix' ? 16 : 512,
       });
       if (text !== undefined) client[field] = text;
     }
@@ -316,13 +322,22 @@ function validateClients(items: unknown[], errors: string[]): Partial<Client>[] 
 
     const uuid = String(client.uuid || '');
     const token = String(client.token || '');
+    const tokenHash = String(client.token_hash || '');
     if (uuid) {
       if (uuids.has(uuid)) errors.push(`clients uuid 重复: ${uuid}`);
       uuids.add(uuid);
     }
+    if (!token && !tokenHash) {
+      errors.push(`clients[${index}] 必须包含 token 或 token_hash`);
+    }
     if (token) {
       if (tokens.has(token)) errors.push(`clients token 重复: ${token}`);
       tokens.add(token);
+    }
+    if (tokenHash) {
+      if (!SHA256_HEX_RE.test(tokenHash)) errors.push(`clients[${index}].token_hash 必须是 SHA-256 hex`);
+      if (tokenHashes.has(tokenHash)) errors.push(`clients token_hash 重复: ${tokenHash}`);
+      tokenHashes.add(tokenHash);
     }
 
     clients.push(client as Partial<Client>);
@@ -420,6 +435,39 @@ function validateLoadNotifications(items: unknown[], errors: string[]): any[] {
       last_notified: optionalTimeField(item.last_notified, `load_notifications[${index}].last_notified`, errors),
     }];
   });
+}
+
+/**
+ * Redact sensitive data from backup for plaintext export.
+ * Removes agent token credentials and Telegram bot token.
+ * Should only be used when exporting plaintext (unencrypted) backups.
+ */
+export function redactSensitiveBackupData(backup: BackupData): BackupData {
+  const redacted: BackupData = {
+    ...backup,
+    sensitive: false,
+    warning: 'Plaintext backup with sensitive data redacted. Agent tokens and Telegram credentials excluded.',
+  };
+
+  // Redact client tokens - remove token_hash (the bearer credential) and token
+  if (backup.clients && backup.clients.length > 0) {
+    redacted.clients = backup.clients.map(client => {
+      const { token, token_hash, token_prefix, ...safe } = client;
+      return {
+        ...safe,
+        // Keep prefix for display purposes only (not a credential)
+        token_prefix: token_prefix || '',
+      };
+    });
+  }
+
+  // Redact Telegram credentials from settings
+  if (backup.settings) {
+    const { telegram_bot_token, telegram_chat_id, ...safeSettings } = backup.settings;
+    redacted.settings = safeSettings;
+  }
+
+  return redacted;
 }
 
 export function validateBackup(input: unknown): BackupValidationResult {

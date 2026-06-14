@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Badge,
   Box,
@@ -260,7 +260,7 @@ function TaskDialog({
 
         <Flex gap="3" justify="end" mt="4">
           <Button variant="soft" onClick={() => onOpenChange(false)}>取消</Button>
-          <Button onClick={handleSave} disabled={saving}>{saving ? '保存中...' : '保存'}</Button>
+          <Button onClick={handleSave} disabled={saving}>{saving ? '保存中…' : '保存'}</Button>
         </Flex>
       </Dialog.Content>
     </Dialog.Root>
@@ -523,12 +523,12 @@ export default function AdminPingTasks() {
           </Table.Root>
         </Card>
       ) : (
-        <Card style={{ overflowX: 'auto' }}>
-          <Table.Root>
+        <Card className="admin-ping-server-card" style={{ overflowX: 'auto' }}>
+          <Table.Root className="admin-ping-server-table">
             <Table.Header>
               <Table.Row>
                 <Table.ColumnHeaderCell>服务器</Table.ColumnHeaderCell>
-                <Table.ColumnHeaderCell>分组</Table.ColumnHeaderCell>
+                <Table.ColumnHeaderCell className="admin-ping-server-group-header">分组</Table.ColumnHeaderCell>
                 <Table.ColumnHeaderCell>区域</Table.ColumnHeaderCell>
                 <Table.ColumnHeaderCell>绑定任务</Table.ColumnHeaderCell>
                 <Table.ColumnHeaderCell>任务数量</Table.ColumnHeaderCell>
@@ -538,7 +538,11 @@ export default function AdminPingTasks() {
               {serverRows.map(({ client, boundTasks }) => (
                 <Table.Row key={client.uuid}>
                   <Table.Cell><Text size="2" weight="bold">{client.name}</Text></Table.Cell>
-                  <Table.Cell><Text size="1">{client.group || '-'}</Text></Table.Cell>
+                  <Table.Cell className="admin-ping-server-group-cell">
+                    <Text className="admin-ping-server-group-text" size="1" title={client.group || '-'}>
+                      {client.group || '-'}
+                    </Text>
+                  </Table.Cell>
                   <Table.Cell>{client.region ? <Badge variant="soft">{client.region}</Badge> : <Text size="1" color="gray">-</Text>}</Table.Cell>
                   <Table.Cell>
                     <Flex gap="1" wrap="wrap">

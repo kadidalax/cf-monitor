@@ -11,6 +11,7 @@ import { normalizeMonitorReport } from '../utils/monitor-report';
 import { validatePingResults } from '../utils/ping-result';
 import { escapeTelegramHtml } from '../utils/telegram';
 import { bestEffortRecordHealthEvent, errorDetail } from '../utils/observability';
+import { LRUCache, LRUCacheWithStats } from '../utils/lru-cache';
 
 const clientRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 const HTTP_LIVE_TTL_FALLBACK_MS = 180_000;
@@ -18,13 +19,19 @@ const HTTP_LIVE_TTL_MAX_MS = 24 * 60 * 60 * 1000;
 const AGENT_AUTH_CACHE_MS = 15_000;
 const AGENT_AUTH_NEGATIVE_CACHE_MS = 5_000;
 const AGENT_AUTH_CACHE_MAX_ENTRIES = 512;
+const AGENT_AUTH_RATE_LIMIT_WINDOW_MS = 60_000;
+const AGENT_AUTH_RATE_LIMIT_MAX_PER_IP = 60; // 降低从600到60
+const AGENT_AUTH_RATE_LIMIT_MAX_PER_PREFIX = 30; // 降低从180到30
 const AGENT_PING_TASK_CACHE_MS = 30_000;
 const AGENT_PING_TASK_EMPTY_POLL_SEC = 600;
 const AGENT_PING_TASK_MAX_POLL_SEC = 3600;
 const AGENT_PING_TASK_MIN_POLL_SEC = 60;
 const AGENT_PING_TASK_DEFAULT_INTERVAL_SEC = 300;
 const AGENT_PING_INTERVAL_SETTING_CACHE_MS = 5_000;
+const HTTP_LAST_SEEN_UPDATE_INTERVAL_MS = 30_000;
+const HTTP_LAST_SEEN_CACHE_MAX_ENTRIES = 4096;
 const IP_CHANGE_NOTIFICATION_SETTING_KEYS = [
+  'notification_method',
   'enable_ip_change_notification',
   'telegram_bot_token',
   'telegram_chat_id',
@@ -36,12 +43,26 @@ const AGENT_POLICY_SETTING_KEYS = [
 ];
 const AGENT_PING_INTERVAL_SETTING_KEYS = ['ping_record_persist_interval_sec'];
 
-type AgentAuthCacheEntry<T> = { value: T | null; expiresAt: number };
-
-let agentAuthCache = new Map<string, AgentAuthCacheEntry<db.Client>>();
-let agentIdentityAuthCache = new Map<string, AgentAuthCacheEntry<db.ClientIdentity>>();
+// 使用LRU缓存替代普通Map
+const agentAuthCache = new LRUCacheWithStats<string, db.Client>(AGENT_AUTH_CACHE_MAX_ENTRIES);
+const agentIdentityAuthCache = new LRUCacheWithStats<string, db.ClientIdentity>(AGENT_AUTH_CACHE_MAX_ENTRIES);
+const httpLastSeenWriteAt = new LRUCache<string, number>(HTTP_LAST_SEEN_CACHE_MAX_ENTRIES);
 let agentPingTasksCache: { value: db.PingTask[]; expiresAt: number } | null = null;
 let agentPingIntervalCache: { value: number; expiresAt: number } | null = null;
+
+function reserveHttpLastSeenWrite(clientId: string, nowMs: number, persisted: boolean): boolean {
+  if (persisted) {
+    httpLastSeenWriteAt.set(clientId, nowMs, HTTP_LAST_SEEN_UPDATE_INTERVAL_MS, nowMs);
+    return true;
+  }
+
+  const lastWriteAt = httpLastSeenWriteAt.get(clientId, nowMs);
+  if (lastWriteAt !== null && nowMs - lastWriteAt < HTTP_LAST_SEEN_UPDATE_INTERVAL_MS) {
+    return false;
+  }
+  httpLastSeenWriteAt.set(clientId, nowMs, HTTP_LAST_SEEN_UPDATE_INTERVAL_MS, nowMs);
+  return true;
+}
 
 export function invalidateAgentClientAuthCache(client?: { uuid?: string; token?: string }): void {
   if (!client) {
@@ -49,13 +70,16 @@ export function invalidateAgentClientAuthCache(client?: { uuid?: string; token?:
     agentIdentityAuthCache.clear();
     return;
   }
-  for (const [token, entry] of agentAuthCache) {
-    if (token === client.token || entry.value?.uuid === client.uuid) {
+
+  // 清除特定token或uuid的缓存
+  const now = Date.now();
+  for (const [token, cachedClient] of agentAuthCache.entries(now)) {
+    if (token === client.token || cachedClient.uuid === client.uuid) {
       agentAuthCache.delete(token);
     }
   }
-  for (const [token, entry] of agentIdentityAuthCache) {
-    if (token === client.token || entry.value?.uuid === client.uuid) {
+  for (const [token, cachedIdentity] of agentIdentityAuthCache.entries(now)) {
+    if (token === client.token || cachedIdentity.uuid === client.uuid) {
       agentIdentityAuthCache.delete(token);
     }
   }
@@ -66,51 +90,46 @@ export function invalidateAgentPingTaskCache(): void {
   agentPingIntervalCache = null;
 }
 
-function setAgentAuthCache<T>(
-  cache: Map<string, AgentAuthCacheEntry<T>>,
-  token: string,
-  value: T | null,
-  ttlMs: number,
-  now: number,
-): void {
-  if (cache.size >= AGENT_AUTH_CACHE_MAX_ENTRIES) {
-    const firstKey = cache.keys().next().value;
-    if (typeof firstKey === 'string') cache.delete(firstKey);
-  }
-  cache.set(token, {
-    value,
-    expiresAt: now + ttlMs,
-  });
+/**
+ * 获取认证缓存统计信息（用于监控）
+ */
+export function getAgentAuthCacheStats() {
+  return {
+    client_cache: agentAuthCache.getStats(),
+    identity_cache: agentIdentityAuthCache.getStats(),
+  };
 }
 
 export async function getAgentClientByToken(database: D1Database, token: string): Promise<db.Client | null> {
   const now = Date.now();
-  const cached = agentAuthCache.get(token);
-  if (cached && cached.expiresAt > now) {
-    return cached.value;
+  const cached = agentAuthCache.get(token, now);
+  if (cached !== null) {
+    return cached;
   }
 
   const client = await db.getClientByToken(database, token);
   if (client) {
-    setAgentAuthCache(agentAuthCache, token, client, AGENT_AUTH_CACHE_MS, now);
+    agentAuthCache.set(token, client, AGENT_AUTH_CACHE_MS, now);
   } else {
-    setAgentAuthCache(agentAuthCache, token, null, AGENT_AUTH_NEGATIVE_CACHE_MS, now);
+    // 负缓存：记录认证失败，避免重复查询
+    agentAuthCache.set(token, { uuid: '', name: '', hidden: false } as any, AGENT_AUTH_NEGATIVE_CACHE_MS, now);
   }
   return client;
 }
 
 export async function getAgentClientIdentityByToken(database: D1Database, token: string): Promise<db.ClientIdentity | null> {
   const now = Date.now();
-  const cached = agentIdentityAuthCache.get(token);
-  if (cached && cached.expiresAt > now) {
-    return cached.value;
+  const cached = agentIdentityAuthCache.get(token, now);
+  if (cached !== null) {
+    return cached;
   }
 
   const client = await db.getClientIdentityByToken(database, token);
   if (client) {
-    setAgentAuthCache(agentIdentityAuthCache, token, client, AGENT_AUTH_CACHE_MS, now);
+    agentIdentityAuthCache.set(token, client, AGENT_AUTH_CACHE_MS, now);
   } else {
-    setAgentAuthCache(agentIdentityAuthCache, token, null, AGENT_AUTH_NEGATIVE_CACHE_MS, now);
+    // 负缓存
+    agentIdentityAuthCache.set(token, { uuid: '', name: '', hidden: false } as any, AGENT_AUTH_NEGATIVE_CACHE_MS, now);
   }
   return client;
 }
@@ -224,23 +243,75 @@ function ipChangeParts(oldIpv4: string, oldIpv6: string, newIpv4: string, newIpv
   return parts;
 }
 
-async function recordIpChangeIfEnabled(c: any, clientName: string, parts: string[]): Promise<void> {
+async function recordIpChangeDelivery(
+  c: any,
+  clientUuid: string,
+  status: db.NotificationDeliveryStatus,
+  attemptedAt: string,
+  error?: unknown,
+): Promise<void> {
+  try {
+    await db.insertNotificationDelivery(c.env.DB, {
+      notification_type: 'ip_change',
+      channel: 'telegram',
+      status,
+      target: clientUuid,
+      client: clientUuid,
+      attempted_at: attemptedAt,
+      sent_at: status === 'sent' ? attemptedAt : null,
+      error,
+    });
+  } catch (deliveryError) {
+    await bestEffortRecordHealthEvent(
+      c.env.DB,
+      'notification_delivery',
+      'error',
+      `IP change delivery write failed: ${errorDetail(deliveryError)}`,
+      { auditAction: 'notification_delivery_error' },
+    );
+  }
+}
+
+async function recordIpChangeIfEnabled(c: any, clientUuid: string, clientName: string, parts: string[]): Promise<void> {
   if (parts.length === 0) return;
 
   const settings = await db.getSettingsByKeys(c.env.DB, IP_CHANGE_NOTIFICATION_SETTING_KEYS);
   if (settings['enable_ip_change_notification'] !== 'true') return;
+  const attemptedAt = new Date().toISOString();
+  if (settings['notification_method'] !== 'telegram') {
+    await db.insertAuditLog(c.env.DB, 'system', 'ip_change',
+      `IP 变更未发送通知: notification_method=${settings['notification_method'] || 'unset'}; ${clientName} ${parts.join(', ')}`);
+    await recordIpChangeDelivery(c, clientUuid, 'skipped', attemptedAt, 'notification_method is not telegram');
+    return;
+  }
 
   const message = `CF Monitor IP 变更通知\n节点: ${clientName}\n${parts.join('\n')}`;
   const botToken = settings['telegram_bot_token'];
   const chatId = settings['telegram_chat_id'];
-  if (botToken && chatId) {
+  if (!botToken || !chatId) {
+    await recordIpChangeDelivery(c, clientUuid, 'skipped', attemptedAt, 'telegram credentials are not configured');
+  } else {
     try {
-      await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chat_id: chatId, text: escapeTelegramHtml(message), parse_mode: 'HTML' }),
       });
-    } catch { /* best effort */ }
+      if (response.ok) {
+        await recordIpChangeDelivery(c, clientUuid, 'sent', attemptedAt);
+      } else {
+        const detail = await response.text().catch(() => '');
+        await recordIpChangeDelivery(
+          c,
+          clientUuid,
+          'failed',
+          attemptedAt,
+          `Telegram HTTP ${response.status}${detail ? `: ${detail.slice(0, 300)}` : ''}`,
+        );
+      }
+    } catch (error) {
+      await recordIpChangeDelivery(c, clientUuid, 'failed', attemptedAt, errorDetail(error));
+    }
   }
 
   await db.insertAuditLog(c.env.DB, 'system', 'ip_change',
@@ -270,7 +341,7 @@ async function syncClientIpsFromReport(
   await db.updateClient(c.env.DB, uuid, updates as any);
   invalidateAgentClientAuthCache({ uuid, token: oldClient.token });
   const parts = ipChangeParts(oldClient.ipv4 || '', oldClient.ipv6 || '', nextIpv4 || oldClient.ipv4 || '', nextIpv6 || oldClient.ipv6 || '');
-  await recordIpChangeIfEnabled(c, clientName, parts);
+  await recordIpChangeIfEnabled(c, uuid, clientName, parts);
 }
 
 async function updateLiveReport(
@@ -328,6 +399,47 @@ function bearerToken(c: any): string {
   return authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
 }
 
+async function checkAgentAuthBucket(
+  c: any,
+  bucket: string,
+  ip: string,
+  max: number,
+): Promise<any | null> {
+  try {
+    const doId = c.env.RATE_LIMIT.idFromName('agent-auth');
+    const stub = c.env.RATE_LIMIT.get(doId);
+    const response = await stub.fetch(new Request('https://rate-limit/rate-limit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        bucket,
+        ip,
+        max,
+        windowMs: AGENT_AUTH_RATE_LIMIT_WINDOW_MS,
+      }),
+    }));
+    return await response.json().catch(() => null);
+  } catch {
+    return null;
+  }
+}
+
+export async function enforceAgentAuthRateLimit(c: any, token: string): Promise<Response | null> {
+  const ip = requestClientIp(c) || 'unknown';
+  const tokenPrefix = token.slice(0, 12) || 'empty';
+  const checks = await Promise.all([
+    checkAgentAuthBucket(c, 'agent-auth-ip', ip, AGENT_AUTH_RATE_LIMIT_MAX_PER_IP),
+    checkAgentAuthBucket(c, `agent-auth-prefix:${tokenPrefix}`, ip, AGENT_AUTH_RATE_LIMIT_MAX_PER_PREFIX),
+  ]);
+  const limited = checks.find(result => result?.allowed === false);
+  if (!limited) return null;
+
+  c.header('Retry-After', String(limited.retry_after || 60));
+  c.header('X-RateLimit-Limit', String(limited.limit || AGENT_AUTH_RATE_LIMIT_MAX_PER_IP));
+  c.header('X-RateLimit-Remaining', String(limited.remaining || 0));
+  return c.json({ error: '认证请求过于频繁，请稍后再试' }, 429);
+}
+
 // Agent Token 认证中间件
 async function clientAuth(c: any, next: any) {
   const token = bearerToken(c).trim();
@@ -335,6 +447,9 @@ async function clientAuth(c: any, next: any) {
   if (!token) {
     return c.json({ error: '缺少认证 Token' }, 401);
   }
+
+  const limited = await enforceAgentAuthRateLimit(c, token);
+  if (limited) return limited;
 
   const client = await getAgentClientByToken(c.env.DB, token);
   if (!client) {
@@ -354,6 +469,9 @@ async function clientIdentityAuth(c: any, next: any) {
   if (!token) {
     return c.json({ error: '缺少认证 Token' }, 401);
   }
+
+  const limited = await enforceAgentAuthRateLimit(c, token);
+  if (limited) return limited;
 
   const client = await getAgentClientIdentityByToken(c.env.DB, token);
   if (!client) {
@@ -440,9 +558,11 @@ clientRoutes.post('/uploadBasicInfo', clientAuth, async (c) => {
 
     await recordIpChangeIfEnabled(
       c,
+      uuid,
       displayName,
       ipChangeParts(oldIpv4, oldIpv6, inferredIpv4, inferredIpv6),
     );
+    await db.markClientSeen(c.env.DB, uuid, new Date().toISOString(), 'basic');
 
     return c.json({ success: true });
   } catch {
@@ -466,6 +586,16 @@ clientRoutes.post('/report', clientAuth, async (c) => {
     await syncClientIpsFromReport(c, uuid, liveName, report, authClient || null);
 
     const persisted = await updateLiveReport(c, uuid, liveName, hidden, reports.length > 1 ? reports : report, nowMs);
+    const seenAt = new Date(nowMs).toISOString();
+    const shouldWriteLastSeen = reserveHttpLastSeenWrite(uuid, nowMs, persisted);
+    if (shouldWriteLastSeen) {
+      try {
+        await db.markClientSeen(c.env.DB, uuid, seenAt, 'http', persisted ? seenAt : null, report.report_interval);
+      } catch (error) {
+        httpLastSeenWriteAt.delete(uuid);
+        throw error;
+      }
+    }
     if (persisted) {
       // 版本信息不需要每次上报写入 D1，跟随历史采样刷新即可。
       if (report.version && clientFieldChanged(authClient?.version, report.version)) {
@@ -543,6 +673,7 @@ clientRoutes.post('/ping/result', clientIdentityAuth, async (c) => {
     }
     const doResult = await doResponse.json().catch(() => null) as { accepted?: unknown } | null;
     const accepted = Number(doResult?.accepted || 0);
+    await db.markClientSeen(c.env.DB, uuid, new Date().toISOString(), 'ping', accepted > 0 ? new Date().toISOString() : null);
     return c.json({ success: true, accepted });
   } catch (error) {
     await bestEffortRecordHealthEvent(

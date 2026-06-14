@@ -1,6 +1,8 @@
 -- Reset local D1 tables before re-running the schema migrations and demo seed.
 -- Intended for `npm run db:reset:local`; do not run against production data.
 DROP TABLE IF EXISTS audit_logs;
+DROP TABLE IF EXISTS notification_incidents;
+DROP TABLE IF EXISTS notification_deliveries;
 DROP TABLE IF EXISTS load_notifications;
 DROP TABLE IF EXISTS expiry_notifications;
 DROP TABLE IF EXISTS offline_notifications;

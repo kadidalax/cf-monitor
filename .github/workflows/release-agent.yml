@@ -58,6 +58,8 @@ jobs:
           build darwin arm64 cf-monitor-agent-darwin-arm64
           build windows amd64 cf-monitor-agent-windows-amd64.exe
 
+          (cd dist && sha256sum * > SHA256SUMS)
+
       - name: Publish installable agent release
         env:
           GH_TOKEN: ${{ github.token }}

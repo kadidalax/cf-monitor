@@ -71,7 +71,6 @@ type BasicInfo struct {
 }
 
 type Report struct {
-	Token          string    `json:"token,omitempty"`
 	CPU            float64   `json:"cpu"`
 	GPU            float64   `json:"gpu"`
 	RAM            int64     `json:"ram"`
@@ -389,7 +388,11 @@ func detectNvidiaGPU() ([]string, []GPUInfo) {
 		return nil, nil
 	}
 
-	cmd := exec.Command(nvidiaSmi,
+	// AGT-3: Add timeout to prevent indefinite blocking
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, nvidiaSmi,
 		"--query-gpu=index,name,memory.total,memory.used,utilization.gpu,temperature.gpu",
 		"--format=csv,noheader,nounits",
 	)
@@ -509,7 +512,11 @@ func detectAMDGPU() ([]string, []GPUInfo) {
 		return nil, nil
 	}
 
-	cmd := exec.Command(rocmSmi, "--showproductname", "--showmeminfo", "vram", "--showuse", "--showtemp")
+	// AGT-3: Add timeout to prevent indefinite blocking
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, rocmSmi, "--showproductname", "--showmeminfo", "vram", "--showuse", "--showtemp")
 	output, err := cmd.Output()
 	if err != nil {
 		log.Printf("rocm-smi query failed: %v", err)
@@ -522,6 +529,15 @@ func detectAMDGPU() ([]string, []GPUInfo) {
 // ==================== Ping Execution ====================
 
 func runPingPoller() {
+	// AGT-2: Panic recovery to prevent silent goroutine death
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("PANIC in runPingPoller (restarting): %v", r)
+			time.Sleep(5 * time.Second)
+			go runPingPoller() // Restart the goroutine
+		}
+	}()
+
 	scheduler := newPingTaskScheduler()
 	for {
 		tasks, nextPollSec := executePingTasks(scheduler, time.Now())
@@ -639,7 +655,87 @@ func pingPollDelay(tasks []PingTask, configuredIntervalSec int, suggestedNextPol
 	return time.Duration(intervalSec) * time.Second
 }
 
+// AGT-6: Validate ping target to prevent SSRF to private/loopback addresses
+func isPrivateOrLoopbackIP(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	// Check RFC1918 private ranges
+	privateRanges := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"169.254.0.0/16", // link-local
+		"127.0.0.0/8",    // loopback
+		"::1/128",        // IPv6 loopback
+		"fc00::/7",       // IPv6 unique local
+		"fe80::/10",      // IPv6 link-local
+	}
+	for _, cidr := range privateRanges {
+		_, ipnet, err := net.ParseCIDR(cidr)
+		if err == nil && ipnet.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func validatePingTarget(target string) error {
+	// Extract hostname from target (remove port if present)
+	host := target
+	if strings.Contains(target, ":") {
+		var err error
+		host, _, err = net.SplitHostPort(target)
+		if err != nil {
+			// If split fails, treat entire target as host
+			host = target
+		}
+	}
+
+	// Resolve hostname to IP
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return fmt.Errorf("hostname resolution failed: %w", err)
+	}
+
+	// Check if any resolved IP is private/loopback
+	for _, ip := range ips {
+		if isPrivateOrLoopbackIP(ip) {
+			return fmt.Errorf("target resolves to private/loopback IP: %s", ip)
+		}
+	}
+
+	return nil
+}
+
+func normalizePingTarget(target string) (string, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", fmt.Errorf("ping target is empty")
+	}
+	if strings.ContainsAny(target, "\x00\r\n") {
+		return "", fmt.Errorf("ping target contains control characters")
+	}
+	if strings.HasPrefix(target, "-") || (runtime.GOOS == "windows" && strings.HasPrefix(target, "/")) {
+		return "", fmt.Errorf("ping target must not start with an option prefix")
+	}
+	return target, nil
+}
+
 func executeICMPPing(target string) float64 {
+	target, err := normalizePingTarget(target)
+	if err != nil {
+		log.Printf("icmp ping target rejected: %v", err)
+		return -1
+	}
+
+	// AGT-6: Validate target before execution (optional - can be disabled for internal monitoring)
+	// Uncomment to enforce SSRF protection:
+	// if err := validatePingTarget(target); err != nil {
+	// 	log.Printf("ping target validation failed: %v", err)
+	// 	return -1
+	// }
+
 	start := time.Now()
 
 	// Use system ping command for cross-platform ICMP
@@ -647,7 +743,7 @@ func executeICMPPing(target string) float64 {
 	if runtime.GOOS == "windows" {
 		cmd = exec.Command("ping", "-n", "1", "-w", "2000", target)
 	} else {
-		cmd = exec.Command("ping", "-c", "1", "-W", "2", target)
+		cmd = exec.Command("ping", "-c", "1", "-W", "2", "--", target)
 	}
 
 	err := cmd.Run()
@@ -660,6 +756,19 @@ func executeICMPPing(target string) float64 {
 }
 
 func executeTCPPing(target string) float64 {
+	target, err := normalizePingTarget(target)
+	if err != nil {
+		log.Printf("tcp ping target rejected: %v", err)
+		return -1
+	}
+
+	// AGT-6: Validate target before execution (optional)
+	// Uncomment to enforce SSRF protection:
+	// if err := validatePingTarget(target); err != nil {
+	// 	log.Printf("tcp ping target validation failed: %v", err)
+	// 	return -1
+	// }
+
 	// Ensure target has port
 	if !strings.Contains(target, ":") {
 		target = target + ":80"
@@ -677,6 +786,13 @@ func executeTCPPing(target string) float64 {
 }
 
 func executeHTTPPing(target string) float64 {
+	var err error
+	target, err = normalizePingTarget(target)
+	if err != nil {
+		log.Printf("http ping target rejected: %v", err)
+		return -1
+	}
+
 	if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
 		target = "https://" + target
 	}
@@ -748,6 +864,15 @@ func uploadBasicInfoWithContext(ctx context.Context) {
 }
 
 func runBasicInfoRefresher(interval time.Duration, stop <-chan struct{}) {
+	// AGT-2: Panic recovery to prevent silent goroutine death
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("PANIC in runBasicInfoRefresher (restarting): %v", r)
+			time.Sleep(5 * time.Second)
+			go runBasicInfoRefresher(interval, stop) // Restart the goroutine
+		}
+	}()
+
 	if interval <= 0 {
 		interval = basicInfoRefreshInterval
 	}
@@ -785,31 +910,44 @@ func runHTTPReporter() {
 	nextUploadAt := time.Now()
 	var pending []Report
 
+	// AGT-4: Cache policy fetch to reduce API load
+	// Only fetch policy every 10 cycles or when sample interval is short
+	policyFetchCounter := 0
+	const policyFetchInterval = 10 // Fetch policy every 10 sample cycles
+
 	for {
-		if policy, err := fetchAgentPolicy(); err == nil {
-			nextSampleInterval, nextUploadInterval := policyDurations(policy, currentSampleInterval)
-			if nextSampleInterval != currentSampleInterval || nextUploadInterval != currentUploadInterval {
-				currentSampleInterval = nextSampleInterval
-				currentUploadInterval = nextUploadInterval
-				reportInterval = int(currentSampleInterval / time.Second)
-				nextUploadAt = time.Now().Add(currentUploadInterval)
-				log.Printf("HTTP policy: mode=%s sample=%s upload=%s viewers=%d ttl=%ds",
-					policy.Mode,
-					currentSampleInterval,
-					currentUploadInterval,
-					policy.ViewerCount,
-					policy.ViewerTTLSec,
-				)
-			}
-			if policy.ReportNow {
-				pending = append(pending, preparer.prepareForInterval(currentSampleInterval))
-				sendHTTPReports(pending)
-				pending = nil
+		// AGT-4: Conditional policy fetch
+		shouldFetchPolicy := policyFetchCounter == 0 ||
+			(currentSampleInterval < 30*time.Second && policyFetchCounter%(policyFetchInterval/3) == 0)
+
+		if shouldFetchPolicy {
+			if policy, err := fetchAgentPolicy(); err == nil {
+				nextSampleInterval, nextUploadInterval := policyDurations(policy, currentSampleInterval)
+				if nextSampleInterval != currentSampleInterval || nextUploadInterval != currentUploadInterval {
+					currentSampleInterval = nextSampleInterval
+					currentUploadInterval = nextUploadInterval
+					reportInterval = int(currentSampleInterval / time.Second)
+					nextUploadAt = time.Now().Add(currentUploadInterval)
+					log.Printf("HTTP policy: mode=%s sample=%s upload=%s viewers=%d ttl=%ds",
+						policy.Mode,
+						currentSampleInterval,
+						currentUploadInterval,
+						policy.ViewerCount,
+						policy.ViewerTTLSec,
+					)
+				}
+				if policy.ReportNow {
+					pending = append(pending, preparer.prepareForInterval(currentSampleInterval))
+					sendHTTPReports(pending)
+					pending = nil
 				nextUploadAt = time.Now().Add(currentUploadInterval)
 			}
 		} else {
 			log.Printf("HTTP policy fetch failed: %v", err)
 		}
+
+		// AGT-4: Increment policy fetch counter
+		policyFetchCounter = (policyFetchCounter + 1) % (policyFetchInterval * 2)
 
 		pending = append(pending, preparer.prepareForInterval(currentSampleInterval))
 		if currentUploadInterval <= currentSampleInterval || !time.Now().Before(nextUploadAt) {
@@ -830,21 +968,47 @@ func runWebSocketReporter() {
 	log.Printf("WebSocket reporter started: %s", endpoint)
 	preparer := &reportPreparer{}
 
+	// AGT-5: Exponential backoff for reconnection
+	reconnectAttempts := 0
+	const maxReconnectAttempts = 10
+
 	for {
 		conn, err := connectWebSocket(endpoint, token)
 		if err != nil {
 			log.Printf("WebSocket connect failed: %v", err)
-			time.Sleep(time.Duration(reconnectInterval) * time.Second)
+
+			// Calculate backoff delay: min(reconnectInterval * 2^attempts, 300s)
+			backoffFactor := 1 << uint(reconnectAttempts) // 2^attempts
+			if backoffFactor > 60 {
+				backoffFactor = 60 // Cap multiplier at 60x
+			}
+			delay := time.Duration(reconnectInterval) * time.Second * time.Duration(backoffFactor)
+			maxDelay := 300 * time.Second
+			if delay > maxDelay {
+				delay = maxDelay
+			}
+
+			if reconnectAttempts < maxReconnectAttempts {
+				reconnectAttempts++
+			}
+
+			log.Printf("reconnecting in %v (attempt %d)", delay, reconnectAttempts)
+			time.Sleep(delay)
 			continue
 		}
 
+		// Reset backoff on successful connection
+		reconnectAttempts = 0
 		log.Println("WebSocket connected")
+
 		_ = runWebSocketSession(
 			conn,
 			preparer,
 			time.Duration(reportInterval)*time.Second,
 			30*time.Second,
 		)
+
+		// Normal reconnect after graceful disconnect
 		log.Printf("reconnecting in %ds", reconnectInterval)
 		time.Sleep(time.Duration(reconnectInterval) * time.Second)
 	}
@@ -1275,7 +1439,6 @@ func (p *reportPreparer) prepareReportForInterval(report Report, intervalSec int
 		intervalSec = 1
 	}
 	report.ReportInterval = intervalSec
-	report.Token = token
 	if clientName != "" {
 		report.Name = clientName
 	}
@@ -1536,9 +1699,35 @@ func connectWebSocket(endpoint string, agentToken string) (*safeWebSocketConn, e
 }
 
 func readWebSocketMessages(conn *safeWebSocketConn, done chan<- error, policies chan<- serverMessage) {
+	// AGT-2: Panic recovery to prevent silent goroutine death
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("PANIC in readWebSocketMessages: %v", r)
+			done <- fmt.Errorf("panic: %v", r)
+		}
+	}()
+
+	// AGT-1: Set pong handler to refresh read deadline on server pong response
+	conn.conn.SetPongHandler(func(appData string) error {
+		// Refresh read deadline on each pong (server responds to our ping)
+		return conn.conn.SetReadDeadline(time.Now().Add(90 * time.Second))
+	})
+
+	// Set initial read deadline
+	if err := conn.conn.SetReadDeadline(time.Now().Add(90 * time.Second)); err != nil {
+		done <- err
+		return
+	}
+
 	for {
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
+			done <- err
+			return
+		}
+
+		// Refresh read deadline on every successful read
+		if err := conn.conn.SetReadDeadline(time.Now().Add(90 * time.Second)); err != nil {
 			done <- err
 			return
 		}

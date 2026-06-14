@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { Outlet, Link, useNavigate } from "react-router-dom";
 import { Text, IconButton } from "@radix-ui/themes";
 import { Settings, Sun, Moon, Laptop, Palette, Github } from "lucide-react";
@@ -7,6 +7,11 @@ import { useAuth } from "../contexts/AuthContext";
 import { useTheme } from "../contexts/ThemeContext";
 import { useDisplayTheme } from "../contexts/DisplayThemeContext";
 import { CF_MONITOR_GITHUB_URL } from "../utils/projectLinks";
+
+function cssBackgroundImage(url: string): string {
+  const escapedUrl = url.replace(/[\n\r\f]/g, "").replace(/["\\]/g, "\\$&");
+  return `url("${escapedUrl}")`;
+}
 
 export default function Layout() {
   const { isAuthenticated } = useAuth();
@@ -64,7 +69,7 @@ export default function Layout() {
   return (
     <div
       className={bgUrl ? "layout bg-cover bg-center bg-fixed bg-no-repeat" : "layout"}
-      style={{ backgroundImage: bgUrl ? `url(${bgUrl})` : "none", backgroundColor: bgUrl ? "transparent" : "var(--accent-1)" }}
+      style={{ backgroundImage: bgUrl ? cssBackgroundImage(bgUrl) : "none", backgroundColor: bgUrl ? "transparent" : "var(--accent-1)" }}
     >
       <main
         className="main-content h-full"

@@ -5,6 +5,7 @@ interface SettingDefinition {
   defaultValue: string;
   public: boolean;
   sensitive?: boolean;
+  safeImageUrl?: boolean;
   min?: number;
   max?: number;
   maxLength?: number;
@@ -56,6 +57,11 @@ export const SETTING_SCHEMA = {
     defaultValue: '',
     public: true,
     maxLength: 256,
+  },
+  public_privacy_mode: {
+    type: 'boolean',
+    defaultValue: 'false',
+    public: true,
   },
   record_enabled: {
     type: 'boolean',
@@ -166,12 +172,14 @@ export const SETTING_SCHEMA = {
     type: 'string',
     defaultValue: '',
     public: true,
+    safeImageUrl: true,
     maxLength: 1024,
   },
   theme_bg_mobile: {
     type: 'string',
     defaultValue: '',
     public: true,
+    safeImageUrl: true,
     maxLength: 1024,
   },
   theme_content_width: {
@@ -220,6 +228,38 @@ function normalizeInteger(value: unknown, definition: SettingDefinition): string
   return String(numberValue);
 }
 
+const SAFE_DATA_IMAGE_PATTERN = /^data:image\/(?:png|jpe?g|gif|webp|avif);base64,[A-Za-z0-9+/]+={0,2}$/i;
+const SAFE_RELATIVE_URL_ORIGIN = 'https://cf-monitor.local';
+
+function normalizeSafeImageUrl(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  if (/[\x00-\x1F\x7F]/.test(trimmed)) return null;
+
+  if (SAFE_DATA_IMAGE_PATTERN.test(trimmed)) {
+    return trimmed;
+  }
+
+  if (trimmed.startsWith('/')) {
+    if (trimmed.startsWith('//') || trimmed.startsWith('/\\')) return null;
+    try {
+      const parsed = new URL(trimmed, SAFE_RELATIVE_URL_ORIGIN);
+      if (parsed.origin !== SAFE_RELATIVE_URL_ORIGIN) return null;
+      return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+    } catch {
+      return null;
+    }
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'https:' || !parsed.hostname) return null;
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
 export function isKnownSettingKey(key: string): key is SettingKey {
   return SETTING_KEY_SET.has(key);
 }
@@ -254,6 +294,13 @@ export function normalizeSettingValue(
 
   if (normalized === null) {
     return { ok: false, error: `${key} 类型或取值无效` };
+  }
+
+  if (definition.safeImageUrl) {
+    normalized = normalizeSafeImageUrl(normalized);
+    if (normalized === null) {
+      return { ok: false, error: `${key} 只允许 https://、同源路径或安全 data:image 背景` };
+    }
   }
 
   if (definition.maxLength !== undefined && normalized.length > definition.maxLength) {

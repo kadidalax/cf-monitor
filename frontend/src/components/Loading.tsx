@@ -24,7 +24,7 @@ export default function Loading({ fullScreen, text }: LoadingProps) {
         className="loading-spinner"
       />
       <Text size="2" color="gray">
-        {text || '加载中...'}
+        {text || '加载中…'}
       </Text>
     </Flex>
   );

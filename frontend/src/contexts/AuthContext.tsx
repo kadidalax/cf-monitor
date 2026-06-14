@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
 
 interface User {
   uuid: string;
@@ -105,8 +105,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = useCallback(() => {
     clearAuth();
+    const headers = new Headers();
+    const csrfToken = readCookie(CSRF_COOKIE_NAME);
+    if (csrfToken) {
+      headers.set('X-CSRF-Token', csrfToken);
+    }
     fetch(`${API_BASE}/logout`, {
       method: 'POST',
+      headers,
       credentials: 'same-origin',
     }).catch(() => {});
   }, [clearAuth]);
@@ -149,7 +155,7 @@ export function useApi() {
     const data = await readJson(res);
 
     if (!res.ok) {
-      if (res.status === 401 || res.status === 403) {
+      if (res.status === 401) {
         logout();
       }
       const details = Array.isArray(data.details) ? `: ${data.details.join('；')}` : '';

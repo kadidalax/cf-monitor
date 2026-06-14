@@ -12,6 +12,7 @@ import PriceTags from './PriceTags';
 import { formatBytes, formatPercent, formatSpeed, formatUptime } from '../utils/format';
 import { getOSImage, getOSName } from '../utils/osIcon';
 import { ClientInfo, LiveDataMap, LiveRecord } from '../types';
+import { useIsMobile } from '../hooks/useIsMobile';
 
 interface NodeTableProps {
   nodes: ClientInfo[];
@@ -77,6 +78,7 @@ function DetailSection({ title, children }: { title: string; children: React.Rea
 
 function RemarkDetailRow({ value }: { value?: string }) {
   const text = value?.trim();
+  const isMobile = useIsMobile();
 
   if (!text) {
     return <DetailRow label="备注" value="-" />;
@@ -87,15 +89,20 @@ function RemarkDetailRow({ value }: { value?: string }) {
       <Text size="1" color="gray" className="node-table-detail-label">
         备注
       </Text>
-      <Popover.Root>
-        <Popover.Trigger>
-          <button type="button" className="node-table-remark-trigger" title={text}>
+        <Popover.Root>
+          <Popover.Trigger>
+          <button type="button" className="node-table-remark-trigger" title={text} aria-label="查看完整备注">
             <Text size="2" weight="medium" className="node-table-remark-preview" as="span">
               {text}
             </Text>
           </button>
         </Popover.Trigger>
-        <Popover.Content side="right" align="start" className="node-table-remark-popover">
+        <Popover.Content
+          side={isMobile ? 'bottom' : 'right'}
+          align={isMobile ? 'center' : 'start'}
+          sideOffset={8}
+          className="node-table-remark-popover"
+        >
           <Text size="1" weight="bold" className="node-table-detail-label">
             备注
           </Text>
@@ -325,12 +332,26 @@ export default function NodeTable({ nodes, liveData }: NodeTableProps) {
 
             return (
               <React.Fragment key={node.uuid}>
-                <Table.Row style={{ cursor: 'pointer' }} onClick={() => toggleExpanded(node.uuid)}>
+                <Table.Row
+                  style={{ cursor: 'pointer' }}
+                  tabIndex={0}
+                  aria-expanded={isExpanded}
+                  onClick={() => toggleExpanded(node.uuid)}
+                  onKeyDown={(event) => {
+                    if (event.key !== 'Enter' && event.key !== ' ') return;
+                    event.preventDefault();
+                    toggleExpanded(node.uuid);
+                  }}
+                >
                   <Table.Cell>
                     <IconButton
                       variant="ghost"
                       size="1"
                       aria-label={isExpanded ? '收起详情' : '展开详情'}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        toggleExpanded(node.uuid);
+                      }}
                     >
                       <ChevronRight
                         size={14}
@@ -358,7 +379,7 @@ export default function NodeTable({ nodes, liveData }: NodeTableProps) {
                   </Table.Cell>
                   <Table.Cell>
                     <Flex align="center" gap="2" style={{ minWidth: 0 }}>
-                      <img src={getOSImage(node.os)} alt="" style={{ width: 18, height: 18 }} />
+                      <img src={getOSImage(node.os)} alt="" width={18} height={18} style={{ width: 18, height: 18 }} />
                       <Text size="2" truncate style={{ maxWidth: 82 }}>{getOSName(node.os)}</Text>
                     </Flex>
                   </Table.Cell>

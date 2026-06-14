@@ -8,6 +8,7 @@ import App from './App';
 import { getExplicitThemeAppearance, normalizeThemeMode } from './utils/themeAppearance';
 import type { ThemeMode } from './utils/themeAppearance';
 import { DisplayTheme, normalizeDisplayTheme } from './utils/displayTheme';
+import { syncThemeColorMeta } from './utils/themeColorMeta';
 
 function accentColorForDisplayTheme(theme: DisplayTheme): 'cyan' | 'violet' {
   return theme === 'next' ? 'cyan' : 'violet';
@@ -27,6 +28,9 @@ document.documentElement.setAttribute(
   'data-monitor-theme',
   normalizeDisplayTheme(savedDisplayTheme),
 );
+
+// 首屏即同步移动端浏览器顶栏配色
+syncThemeColorMeta();
 
 const Root = () => {
   const [appearance, setAppearance] = React.useState<'light' | 'dark' | undefined>(

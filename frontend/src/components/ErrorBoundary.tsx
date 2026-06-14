@@ -1,4 +1,4 @@
-﻿import React, { Component, ErrorInfo, ReactNode } from 'react';
+import { Component, ErrorInfo, ReactNode } from 'react';
 import { Flex, Button, Heading, Text, Card, Code } from '@radix-ui/themes';
 import { AlertTriangle, RefreshCw, Home } from 'lucide-react';
 

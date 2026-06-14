@@ -1,15 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
-import { Badge, Box, Button, Flex, Grid, Text } from '@radix-ui/themes';
-import { Database, Eye, Gauge, HardDrive, Save, Server } from 'lucide-react';
+import { Badge, Box, Button, Dialog, Flex, Grid, Text } from '@radix-ui/themes';
+import { Database, Eye, Gauge, HardDrive, RefreshCw, Save, Server } from 'lucide-react';
 import { toast } from 'sonner';
 import Loading from '../../components/Loading';
 import { useApi } from '../../contexts/AuthContext';
 import { LIVE_POLL_SETTINGS_UPDATED_EVENT } from '../../contexts/livePolling';
 import { SettingCard, SettingInput, SettingToggle } from '../../components/admin/SettingCard';
+import { getChangedSettings, type SettingsMap } from '../../utils/settingsDiff';
 import type { SettingsLayoutOutletContext } from './SettingsLayout';
-
-type SettingsMap = Record<string, string>;
 
 interface CapacityEstimate {
   clients: number;
@@ -51,6 +50,15 @@ interface CapacityEstimate {
     name?: string;
     target_client_count?: number;
   }>;
+  actual_row_counts?: {
+    records?: number;
+    gpu_records?: number;
+    gpu_snapshots?: number;
+    ping_records?: number;
+    ping_snapshots?: number;
+    audit_logs?: number;
+    notification_deliveries?: number;
+  } | null;
   d1_reference_rows?: {
     free_warning_rows?: number;
     paid_warning_rows?: number;
@@ -64,6 +72,7 @@ interface CapacityEstimate {
     ping_records?: number;
     ping_snapshots?: number;
     audit_logs?: number;
+    notification_deliveries?: number;
   } | null;
   row_counts_checked_at?: string;
   row_counts_cache_seconds?: number;
@@ -183,7 +192,8 @@ function sumRowCounts(counts: CapacityEstimate['expired_row_counts']): number {
     + Number(counts.gpu_snapshots || 0)
     + Number(counts.ping_records || 0)
     + Number(counts.ping_snapshots || 0)
-    + Number(counts.audit_logs || 0);
+    + Number(counts.audit_logs || 0)
+    + Number(counts.notification_deliveries || 0);
 }
 
 function dailySamplesPerClient(intervalSec: number): number {
@@ -267,24 +277,38 @@ export default function SettingsGeneral() {
   const apiFetch = useApi();
   const { setAction } = useOutletContext<SettingsLayoutOutletContext>();
   const [settings, setSettings] = useState<SettingsMap>({});
+  const [originalSettings, setOriginalSettings] = useState<SettingsMap>({});
   const [capacity, setCapacity] = useState<CapacityEstimate | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [cleaning, setCleaning] = useState(false);
+  const [refreshingCounts, setRefreshingCounts] = useState(false);
+  const [cleanupDialogOpen, setCleanupDialogOpen] = useState(false);
+  const [refreshRowsDialogOpen, setRefreshRowsDialogOpen] = useState(false);
 
   const refreshCapacity = useCallback(async (forceCounts = false) => {
     const path = forceCounts ? '/admin/capacity?refresh_counts=true' : '/admin/capacity';
-    const capacityData = await apiFetch(path).catch(() => null);
-    if (capacityData && typeof capacityData === 'object') setCapacity(capacityData as CapacityEstimate);
+    try {
+      const capacityData = await apiFetch(path);
+      if (capacityData && typeof capacityData === 'object') {
+        setCapacity(capacityData as CapacityEstimate);
+        return true;
+      }
+    } catch {}
+    return false;
   }, [apiFetch]);
 
   useEffect(() => {
     Promise.all([
-      apiFetch('/admin/settings'),
+      apiFetch('/admin/settings?scope=general'),
       apiFetch('/admin/capacity').catch(() => null),
     ])
       .then(([settingsData, capacityData]) => {
-        if (settingsData && typeof settingsData === 'object') setSettings(settingsData as SettingsMap);
+        if (settingsData && typeof settingsData === 'object') {
+          const nextSettings = settingsData as SettingsMap;
+          setSettings(nextSettings);
+          setOriginalSettings(nextSettings);
+        }
         if (capacityData && typeof capacityData === 'object') setCapacity(capacityData as CapacityEstimate);
       })
       .finally(() => setLoading(false));
@@ -305,7 +329,10 @@ export default function SettingsGeneral() {
   const derived = useMemo(() => {
     const clients = Math.max(0, Number(capacity?.clients || 0));
     const gpuClients = Math.max(0, Number(capacity?.gpu_clients || 0));
-    const expiredBacklogRows = sumRowCounts(capacity?.expired_row_counts);
+    const hasActualRowCounts = Boolean(capacity?.actual_row_counts);
+    const hasExpiredRowCounts = Boolean(capacity?.expired_row_counts);
+    const actualRows = sumRowCounts(capacity?.actual_row_counts);
+    const expiredBacklogRows = hasExpiredRowCounts ? sumRowCounts(capacity?.expired_row_counts) : 0;
     const retentionHours = clampInteger(
       settings.record_preserve_time || settings.ping_record_preserve_time,
       DEFAULT_RETENTION_HOURS,
@@ -478,6 +505,9 @@ export default function SettingsGeneral() {
       gpuWritesPerDay: gpuSnapshotsPerDay,
       pingWritesPerDay: pingD1RowsWrittenPerDay,
       pingRowsPerDay,
+      actualRows,
+      hasActualRowCounts,
+      hasExpiredRowCounts,
       expiredBacklogRows,
       retentionHours,
       sampleIntervalSec,
@@ -537,26 +567,33 @@ export default function SettingsGeneral() {
   }, [capacity, settings]);
 
   const handleSave = useCallback(async () => {
+    const payload = {
+      ...settings,
+      record_preserve_time: String(derived.retentionHours),
+      ping_record_preserve_time: String(derived.retentionHours),
+      live_poll_active_interval_sec: String(derived.sampleIntervalSec),
+      live_poll_idle_interval_sec: String(derived.idleUploadIntervalSec),
+      live_poll_active_max_duration_sec: String(derived.viewerTtlSec),
+      record_persist_interval_sec: String(derived.recordPersistIntervalSec),
+      ping_record_persist_interval_sec: String(derived.pingRecordPersistIntervalSec),
+      record_high_watermark_rows: String(derived.recordHighWatermarkRows),
+      capacity_daily_view_minutes: String(derived.dailyViewMinutes),
+    };
+    const changedSettings = getChangedSettings(payload, originalSettings);
+    if (Object.keys(changedSettings).length === 0) {
+      toast.info('没有需要保存的改动');
+      return;
+    }
+
     setSaving(true);
     try {
-      const payload = {
-        ...settings,
-        record_preserve_time: String(derived.retentionHours),
-        ping_record_preserve_time: String(derived.retentionHours),
-        live_poll_active_interval_sec: String(derived.sampleIntervalSec),
-        live_poll_idle_interval_sec: String(derived.idleUploadIntervalSec),
-        live_poll_active_max_duration_sec: String(derived.viewerTtlSec),
-        record_persist_interval_sec: String(derived.recordPersistIntervalSec),
-        ping_record_persist_interval_sec: String(derived.pingRecordPersistIntervalSec),
-        record_high_watermark_rows: String(derived.recordHighWatermarkRows),
-        capacity_daily_view_minutes: String(derived.dailyViewMinutes),
-      };
       const result = await apiFetch('/admin/settings', {
         method: 'POST',
-        body: JSON.stringify(payload),
+        body: JSON.stringify(changedSettings),
       });
       if (result.success) {
         setSettings(payload);
+        setOriginalSettings(payload);
         window.dispatchEvent(new CustomEvent(LIVE_POLL_SETTINGS_UPDATED_EVENT, { detail: payload }));
         toast.success('设置已保存');
       } else {
@@ -567,17 +604,25 @@ export default function SettingsGeneral() {
     } finally {
       setSaving(false);
     }
-  }, [apiFetch, derived, settings]);
+  }, [apiFetch, derived, originalSettings, settings]);
 
-  const handleMaintenanceCleanup = useCallback(async () => {
+  const handleMaintenanceCleanup = useCallback(() => {
+    setCleanupDialogOpen(true);
+  }, []);
+
+  const runMaintenanceCleanup = useCallback(async () => {
     setCleaning(true);
     try {
-      const result = await apiFetch('/admin/maintenance/cleanup', { method: 'POST' });
+      const result = await apiFetch('/admin/maintenance/cleanup', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
       if (result.success) {
         const deleted = result.deleted || {};
-        const totalDeleted = ['records', 'gpu_records', 'gpu_snapshots', 'ping_records', 'ping_snapshots', 'audit_logs']
+        const totalDeleted = ['records', 'gpu_records', 'gpu_snapshots', 'ping_records', 'ping_snapshots', 'audit_logs', 'notification_deliveries']
           .reduce((sum, key) => sum + Number(deleted[key] || 0), 0);
         toast.success(`维护清理完成，删除 ${formatInteger(totalDeleted)} 行历史数据`);
+        setCleanupDialogOpen(false);
         await refreshCapacity(true);
       } else {
         toast.error(result.error || '维护清理失败');
@@ -588,6 +633,25 @@ export default function SettingsGeneral() {
       setCleaning(false);
     }
   }, [apiFetch, refreshCapacity]);
+
+  const handleRefreshActualRows = useCallback(() => {
+    setRefreshRowsDialogOpen(true);
+  }, []);
+
+  const runRefreshActualRows = useCallback(async () => {
+    setRefreshingCounts(true);
+    try {
+      const refreshed = await refreshCapacity(true);
+      if (refreshed) {
+        toast.success('实际行数已刷新');
+        setRefreshRowsDialogOpen(false);
+      } else {
+        toast.error('实际行数刷新失败');
+      }
+    } finally {
+      setRefreshingCounts(false);
+    }
+  }, [refreshCapacity]);
 
   const headerAction = useMemo(() => (
     <Button onClick={handleSave} disabled={loading || saving}>
@@ -620,6 +684,9 @@ export default function SettingsGeneral() {
               </Badge>
               <Button size="1" variant="soft" onClick={handleMaintenanceCleanup} disabled={cleaning}>
                 <Database size={13} /> {cleaning ? '清理中…' : '维护清理'}
+              </Button>
+              <Button size="1" variant="soft" onClick={handleRefreshActualRows} disabled={refreshingCounts}>
+                <RefreshCw size={13} /> {refreshingCounts ? '刷新中…' : '刷新实际行数'}
               </Button>
             </Flex>
           </Flex>
@@ -660,7 +727,16 @@ export default function SettingsGeneral() {
             <EstimateMetric label="D1 读取/天" value={formatInteger(derived.mixedDailyReads)} tone="blue" />
             <EstimateMetric label="经验保留行数" value={formatInteger(derived.estimatedRowsRetained)} tone="purple" />
             <EstimateMetric label="历史高水位" value={`${formatInteger(derived.recordHighWatermarkRows)} 行`} tone={getPercentTone(derived.highWatermarkPercent) === 'red' ? 'red' : 'blue'} />
-            <EstimateMetric label="过期待清理" value={formatInteger(derived.expiredBacklogRows)} tone={derived.expiredBacklogRows > 0 ? 'amber' : 'green'} />
+            <EstimateMetric
+              label="实际行数"
+              value={derived.hasActualRowCounts ? formatInteger(derived.actualRows) : '未刷新'}
+              tone={derived.hasActualRowCounts ? 'green' : 'blue'}
+            />
+            <EstimateMetric
+              label="过期待清理"
+              value={derived.hasExpiredRowCounts ? formatInteger(derived.expiredBacklogRows) : '未刷新'}
+              tone={derived.hasExpiredRowCounts && derived.expiredBacklogRows > 0 ? 'amber' : 'green'}
+            />
             <EstimateMetric label="读取写入倍率" value={`${D1_ROWS_READ_PER_WRITE_ESTIMATE}x`} tone="purple" />
             <EstimateMetric label="全天有人写入/天" value={formatInteger(derived.activeDailyWrites)} tone="amber" />
             <EstimateMetric label="全天无人写入/天" value={formatInteger(derived.idleDailyWrites)} tone="green" />
@@ -673,6 +749,7 @@ export default function SettingsGeneral() {
           </Grid>
           <Text size="1" color="gray" style={{ display: 'block', marginTop: 8 }}>
             保存时会按允许范围校验并归一化；D1 真实风险以存储、rows read、rows written 和查询成本为准，行数只是规划参考。
+            {capacity?.row_counts_checked_at ? ` 实际行数刷新于 ${new Date(capacity.row_counts_checked_at).toLocaleString('zh-CN')}。` : ''}
           </Text>
         </Box>
 
@@ -748,6 +825,108 @@ export default function SettingsGeneral() {
           placeholder="600"
         />
       </SettingCard>
+
+      <Dialog.Root
+        open={cleanupDialogOpen}
+        onOpenChange={(open) => {
+          if (!cleaning) setCleanupDialogOpen(open);
+        }}
+      >
+        <Dialog.Content className="maintenance-dialog" style={{ maxWidth: 460 }}>
+          <div className="maintenance-dialog-rail" aria-hidden="true" />
+          <Flex className="maintenance-dialog-heading" align="start" gap="3">
+            <span className="maintenance-dialog-icon" aria-hidden="true">
+              <Database size={18} />
+            </span>
+            <Box>
+              <Dialog.Title>维护清理</Dialog.Title>
+              <Dialog.Description size="2">
+                删除超过保留时间的历史记录，并刷新容量估算。
+              </Dialog.Description>
+            </Box>
+          </Flex>
+
+          <div className="maintenance-dialog-body">
+            <div className="maintenance-dialog-callout">
+              <Text size="2" weight="bold">预计可清理 {formatInteger(derived.expiredBacklogRows)} 行</Text>
+              <Text size="1" color="gray">
+                只处理已过期的监控、GPU、Ping、审计和通知投递历史；服务器、设置和实时展示数据不会被删除。
+              </Text>
+            </div>
+            <div className="maintenance-dialog-list">
+              <div className="maintenance-dialog-list-item">
+                <Text size="1" color="gray">保留时间</Text>
+                <Badge variant="soft">{derived.retentionHours} 小时</Badge>
+              </div>
+              <div className="maintenance-dialog-list-item">
+                <Text size="1" color="gray">当前实际行数</Text>
+                <Badge variant="soft" color={derived.hasActualRowCounts ? 'green' : 'blue'}>
+                  {derived.hasActualRowCounts ? formatInteger(derived.actualRows) : '未刷新'}
+                </Badge>
+              </div>
+            </div>
+          </div>
+
+          <Flex className="maintenance-dialog-actions" justify="end" gap="2" mt="4">
+            <Button variant="soft" onClick={() => setCleanupDialogOpen(false)} disabled={cleaning}>取消</Button>
+            <Button color="red" onClick={runMaintenanceCleanup} disabled={cleaning}>
+              <Database size={14} /> {cleaning ? '清理中…' : '确认清理'}
+            </Button>
+          </Flex>
+        </Dialog.Content>
+      </Dialog.Root>
+
+      <Dialog.Root
+        open={refreshRowsDialogOpen}
+        onOpenChange={(open) => {
+          if (!refreshingCounts) setRefreshRowsDialogOpen(open);
+        }}
+      >
+        <Dialog.Content className="maintenance-dialog refresh-rows-dialog" style={{ maxWidth: 460 }}>
+          <div className="maintenance-dialog-rail" aria-hidden="true" />
+          <Flex className="maintenance-dialog-heading" align="start" gap="3">
+            <span className="maintenance-dialog-icon" aria-hidden="true">
+              <RefreshCw size={18} />
+            </span>
+            <Box>
+              <Dialog.Title>刷新实际行数</Dialog.Title>
+              <Dialog.Description size="2">
+                重新统计 D1 中各历史表的真实行数，用于校准容量估算。
+              </Dialog.Description>
+            </Box>
+          </Flex>
+
+          <div className="maintenance-dialog-body">
+            <div className="maintenance-dialog-callout">
+              <Text size="2" weight="bold">这不是清理操作</Text>
+              <Text size="1" color="gray">
+                它只更新“实际行数”和“过期待清理”的统计结果，不会删除数据，也不会修改采集间隔或保留策略。
+              </Text>
+            </div>
+            <div className="maintenance-dialog-list">
+              <div className="maintenance-dialog-list-item">
+                <Text size="1" color="gray">上次刷新</Text>
+                <Badge variant="soft" color={capacity?.row_counts_checked_at ? 'green' : 'blue'}>
+                  {capacity?.row_counts_checked_at ? new Date(capacity.row_counts_checked_at).toLocaleString('zh-CN') : '尚未刷新'}
+                </Badge>
+              </div>
+              <div className="maintenance-dialog-list-item">
+                <Text size="1" color="gray">当前显示</Text>
+                <Badge variant="soft" color={derived.hasActualRowCounts ? 'green' : 'blue'}>
+                  {derived.hasActualRowCounts ? `${formatInteger(derived.actualRows)} 行` : '估算值'}
+                </Badge>
+              </div>
+            </div>
+          </div>
+
+          <Flex className="maintenance-dialog-actions" justify="end" gap="2" mt="4">
+            <Button variant="soft" onClick={() => setRefreshRowsDialogOpen(false)} disabled={refreshingCounts}>取消</Button>
+            <Button onClick={runRefreshActualRows} disabled={refreshingCounts}>
+              <RefreshCw size={14} /> {refreshingCounts ? '刷新中…' : '开始刷新'}
+            </Button>
+          </Flex>
+        </Dialog.Content>
+      </Dialog.Root>
     </Flex>
   );
 }

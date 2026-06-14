@@ -17,5 +17,26 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: false,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return undefined;
+          if (/[\\/]node_modules[\\/](react|react-dom|react-router-dom)[\\/]/.test(id)) {
+            return 'vendor-react';
+          }
+          if (/[\\/]node_modules[\\/](@radix-ui[\\/]themes|lucide-react)[\\/]/.test(id)) {
+            return 'vendor-ui';
+          }
+          if (/[\\/]node_modules[\\/]recharts[\\/]/.test(id)) {
+            return 'vendor-charts';
+          }
+          if (/[\\/]node_modules[\\/]@dnd-kit[\\/]/.test(id)) {
+            return 'vendor-dnd';
+          }
+          return undefined;
+        },
+      },
+    },
+    chunkSizeWarningLimit: 1000,
   },
 });

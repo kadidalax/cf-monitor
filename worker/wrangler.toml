@@ -3,7 +3,8 @@ main = "src/index.ts"
 compatibility_date = "2025-04-01"
 
 [triggers]
-crons = ["*/10 * * * *"]
+# Runs every minute for low-latency offline checks; heavy cleanup/expiry jobs are gated in src/index.ts.
+crons = ["* * * * *"]
 
 [[d1_databases]]
 binding = "DB"

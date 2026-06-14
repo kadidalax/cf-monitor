@@ -46,6 +46,10 @@ import {
   ESTIMATED_PING_SNAPSHOT_BYTES,
   buildQuotaReference,
 } from '../utils/quota';
+import { verifyCounters, repairCounters, getCounterStatus } from '../utils/counter-manager';
+import * as cronHealth from '../db/cron-health';
+import * as refreshToken from '../auth/refresh-token';
+import * as passwordReset from '../auth/password-reset';
 
 const adminRoutes = new Hono<{ Bindings: Bindings; Variables: Variables }>();
 const MIN_ADMIN_PASSWORD_BYTES = 12;
@@ -78,6 +82,39 @@ const CAPACITY_ESTIMATE_SETTING_KEYS = [
   'audit_log_preserve_time',
   'capacity_daily_view_minutes',
 ];
+const CAPACITY_ESTIMATE_SETTING_KEY_SET = new Set(CAPACITY_ESTIMATE_SETTING_KEYS);
+const SENSITIVE_SETTING_KEYS = (Object.keys(SETTING_SCHEMA) as (keyof typeof SETTING_SCHEMA)[])
+  .filter((key) => 'sensitive' in SETTING_SCHEMA[key] && SETTING_SCHEMA[key].sensitive === true);
+const SENSITIVE_SETTING_KEY_SET = new Set<string>(SENSITIVE_SETTING_KEYS);
+const SETTINGS_SCOPE_KEYS = {
+  site: [
+    'site_title',
+    'site_subtitle',
+    'site_description',
+    'language',
+    'script_domain',
+    'public_privacy_mode',
+  ],
+  general: [
+    'record_enabled',
+    'record_preserve_time',
+    'ping_record_preserve_time',
+    'live_poll_active_interval_sec',
+    'live_poll_idle_interval_sec',
+    'live_poll_active_max_duration_sec',
+    'record_persist_interval_sec',
+    'ping_record_persist_interval_sec',
+    'record_high_watermark_rows',
+    'capacity_daily_view_minutes',
+  ],
+  notification: [
+    'notification_method',
+    'telegram_bot_token',
+    'telegram_chat_id',
+    'enable_ip_change_notification',
+    'offline_notify_never_reported',
+  ],
+} as const satisfies Record<string, readonly (keyof typeof SETTING_SCHEMA)[]>;
 const MAINTENANCE_CLEANUP_SETTING_KEYS = [
   'record_preserve_time',
   'ping_record_preserve_time',
@@ -98,30 +135,49 @@ const REQUIRED_D1_TABLES = [
   'ping_tasks',
   'ping_records',
   'ping_snapshots',
+  'history_row_counters',
   'offline_notifications',
   'expiry_notifications',
   'load_notifications',
+  'notification_deliveries',
+  'notification_incidents',
   'audit_logs',
 ];
 const REQUIRED_D1_COLUMNS: Record<string, string[]> = {
-  clients: ['uuid', 'token', 'name', 'hidden', 'traffic_limit', 'traffic_limit_type', 'sort_order'],
+  clients: ['uuid', 'token', 'token_hash', 'token_prefix', 'name', 'hidden', 'traffic_limit', 'traffic_limit_type', 'sort_order', 'last_seen_at', 'last_report_source', 'last_report_persisted_at', 'last_report_interval_sec'],
   records: ['client', 'time', 'cpu', 'ram', 'disk', 'net_in', 'net_out'],
   gpu_records: ['client', 'time', 'device_index', 'device_name', 'mem_total', 'mem_used', 'utilization', 'temperature'],
   gpu_snapshots: ['client', 'time', 'devices_json'],
-  users: ['uuid', 'username', 'passwd'],
+  users: ['uuid', 'username', 'passwd', 'session_version'],
   login_rate_limits: ['bucket', 'failures', 'first_failed_at', 'last_failed_at', 'locked_until'],
   settings: ['key', 'value'],
   ping_tasks: ['id', 'name', 'clients', 'all_clients', 'type', 'target', 'interval_sec', 'sort_order'],
   ping_records: ['client', 'task_id', 'time', 'value'],
   ping_snapshots: ['client', 'time', 'values_json'],
-  offline_notifications: ['client', 'enable', 'grace_period', 'last_notified'],
-  expiry_notifications: ['client', 'enable', 'advance_days', 'last_notified'],
-  load_notifications: ['id', 'name', 'clients', 'metric', 'threshold', 'ratio', 'interval_min', 'last_notified'],
+  history_row_counters: ['table_name', 'row_count', 'updated_at'],
+  offline_notifications: ['client', 'enable', 'grace_period', 'last_notified', 'last_attempt_at', 'last_sent_at', 'last_error'],
+  expiry_notifications: ['client', 'enable', 'advance_days', 'last_notified', 'last_attempt_at', 'last_sent_at', 'last_error'],
+  load_notifications: ['id', 'name', 'clients', 'metric', 'threshold', 'ratio', 'interval_min', 'last_notified', 'last_attempt_at', 'last_sent_at', 'last_error'],
+  notification_deliveries: ['id', 'notification_type', 'channel', 'status', 'target', 'client', 'rule_id', 'attempted_at', 'sent_at', 'error', 'created_at'],
+  notification_incidents: ['id', 'incident_key', 'notification_type', 'target', 'client', 'rule_id', 'status', 'first_detected_at', 'last_detected_at', 'resolved_at', 'last_attempt_at', 'last_sent_at', 'last_error', 'created_at', 'updated_at'],
   audit_logs: ['id', 'time', 'user', 'action', 'detail', 'level'],
 };
+const REQUIRED_D1_TRIGGERS = [
+  'trg_records_insert',
+  'trg_gpu_records_insert',
+  'trg_gpu_snapshots_insert',
+  'trg_ping_records_insert',
+  'trg_ping_snapshots_insert',
+  'trg_records_delete',
+  'trg_gpu_records_delete',
+  'trg_gpu_snapshots_delete',
+  'trg_ping_records_delete',
+  'trg_ping_snapshots_delete',
+];
 const MONITOR_RECORD_D1_ROWS_WRITTEN = 3;
 const GPU_SNAPSHOT_D1_ROWS_WRITTEN = 3;
 const PING_SNAPSHOT_D1_ROWS_WRITTEN = 3;
+const HISTORY_DELETE_D1_ROWS_WRITTEN = 2;
 const EMPTY_AGENT_PING_TASK_POLL_SEC = 600;
 const DEFAULT_UNIFIED_PING_INTERVAL_SEC = 300;
 const MIN_UNIFIED_PING_INTERVAL_SEC = 60;
@@ -180,18 +236,28 @@ export async function generateUniqueClientToken(
   return token;
 }
 
-async function refreshLivePingTasks(c: any): Promise<void> {
+async function refreshLivePingTasks(c: any, removedTaskIds: number[] = []): Promise<void> {
   try {
     const doId = c.env.LIVE_DATA.idFromName('global');
     const stub = c.env.LIVE_DATA.get(doId);
-    await stub.fetch(new Request('https://do/ping-tasks-refresh', { method: 'POST' }));
+    const body = removedTaskIds.length > 0
+      ? JSON.stringify({ removed_task_ids: removedTaskIds })
+      : undefined;
+    await stub.fetch(new Request('https://do/ping-tasks-refresh', {
+      method: 'POST',
+      headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      body,
+    }));
   } catch {
     // The DO cache is short-lived; admin writes should not fail if refresh signalling is unavailable.
   }
 }
 
 async function buildBackupSnapshot(database: D1Database): Promise<BackupData> {
-  const clients = await db.listClients(database);
+  const clients = (await db.listClients(database)).map((client) => {
+    const { token: _token, ...clientWithoutRawToken } = client;
+    return clientWithoutRawToken;
+  });
   const settings = buildAdminSettings(await db.getAllSettings(database));
   const pingTasks = await db.listPingTasks(database);
   const offlineNotifications = await db.listOfflineNotifications(database);
@@ -222,6 +288,45 @@ function isBodyFlagEnabled(body: unknown, key: string): boolean {
   return !!body && typeof body === 'object' && (body as Record<string, unknown>)[key] === true;
 }
 
+function isPlainSettingsBody(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function redactSensitiveAdminSettings(settings: Record<string, string>): Record<string, string> {
+  const redacted = { ...settings };
+  for (const key of SENSITIVE_SETTING_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(redacted, key)) continue;
+    redacted[`${key}_configured`] = redacted[key] ? 'true' : 'false';
+    redacted[key] = '';
+  }
+  return redacted;
+}
+
+function prepareSettingsUpdateBody(body: unknown): {
+  settingsInput: unknown;
+  clearSensitiveKeys: Set<string>;
+} {
+  if (!isPlainSettingsBody(body)) {
+    return { settingsInput: body, clearSensitiveKeys: new Set() };
+  }
+
+  const settingsInput: Record<string, unknown> = { ...body };
+  const clearSensitiveKeys = new Set<string>();
+
+  for (const key of SENSITIVE_SETTING_KEYS) {
+    const clearKey = `${key}_clear`;
+    const clearValue = settingsInput[clearKey];
+    if (clearValue === true || clearValue === 'true') {
+      clearSensitiveKeys.add(key);
+      settingsInput[key] = '';
+    }
+    delete settingsInput[clearKey];
+    delete settingsInput[`${key}_configured`];
+  }
+
+  return { settingsInput, clearSensitiveKeys };
+}
+
 function getRequestIp(c: any): string {
   const forwardedFor = c.req.header('X-Forwarded-For') || '';
   return (
@@ -230,6 +335,32 @@ function getRequestIp(c: any): string {
     forwardedFor.split(',')[0]?.trim() ||
     'unknown'
   );
+}
+
+async function requireReauthPassword(c: any, body: unknown, action: string): Promise<Response | null> {
+  const password = body && typeof body === 'object' && typeof (body as Record<string, unknown>).reauth_password === 'string'
+    ? String((body as Record<string, unknown>).reauth_password)
+    : '';
+  if (!password) {
+    return c.json({ error: '此操作需要重新输入当前管理员密码' }, 400);
+  }
+
+  const userId = c.get('userId')!;
+  const username = c.get('username') || 'admin';
+  const user = await db.getUserByUuid(c.env.DB, userId);
+  const valid = !!user && await verifyPassword(password, user.passwd);
+  if (!valid) {
+    await db.insertAuditLog(
+      c.env.DB,
+      username,
+      'reauth_failed',
+      `高风险操作重新认证失败: ${action}; ip=${getRequestIp(c)}`,
+      'warning',
+    );
+    return c.json({ error: '管理员密码错误' }, 403);
+  }
+
+  return null;
 }
 
 function getRestoreConfirmationState(c: any, body: unknown): {
@@ -395,7 +526,16 @@ async function runSchemaProbe(database: D1Database, checkedAt: string): Promise<
       return healthEvent('schema_probe', 'error', `Missing D1 columns: ${missingColumns.join(', ')}`, checkedAt);
     }
 
-    return healthEvent('schema_probe', 'ok', `D1 schema contains ${REQUIRED_D1_TABLES.length} required tables and required columns`, checkedAt);
+    const triggerRows = await database.prepare(
+      `SELECT name FROM sqlite_master WHERE type = 'trigger' AND name IN (${REQUIRED_D1_TRIGGERS.map(() => '?').join(', ')})`
+    ).bind(...REQUIRED_D1_TRIGGERS).all<{ name: string }>();
+    const existingTriggers = new Set((triggerRows.results || []).map(row => row.name));
+    const missingTriggers = REQUIRED_D1_TRIGGERS.filter(trigger => !existingTriggers.has(trigger));
+    if (missingTriggers.length > 0) {
+      return healthEvent('schema_probe', 'error', `Missing D1 triggers: ${missingTriggers.join(', ')}`, checkedAt);
+    }
+
+    return healthEvent('schema_probe', 'ok', `D1 schema contains ${REQUIRED_D1_TABLES.length} required tables, required columns, and history counters`, checkedAt);
   } catch (error) {
     return healthEvent('schema_probe', 'error', `D1 schema probe failed: ${errorDetail(error)}`, checkedAt);
   }
@@ -523,10 +663,11 @@ function estimateAgentPingTaskPullsPerDay(
 }
 
 type CapacityRowCountSnapshot = {
-  actual_row_counts: Awaited<ReturnType<typeof db.getStorageRowCounts>> | null;
+  actual_row_counts: Awaited<ReturnType<typeof db.getStorageRowCountsFast>> | null;
   expired_row_counts: Awaited<ReturnType<typeof db.getExpiredRowCounts>> | null;
   checked_at: string;
   cache_key: string;
+  count_source: 'counter' | 'scan';
 };
 
 let capacityRowCountCache: { value: CapacityRowCountSnapshot; expiresAt: number } | null = null;
@@ -540,7 +681,7 @@ function invalidateCapacityEstimateCache(): void {
 async function getCapacityRowCounts(
   database: D1Database,
   settings: Record<string, string>,
-  forceRefresh = false,
+  options: { bypassCache?: boolean; scan?: boolean } = {},
 ): Promise<CapacityRowCountSnapshot> {
   const recordHours = Math.min(72, parsePositiveNumber(settings.record_preserve_time, 72));
   const pingHours = Math.min(72, parsePositiveNumber(settings.ping_record_preserve_time, recordHours));
@@ -548,7 +689,7 @@ async function getCapacityRowCounts(
   const cacheKey = `${recordHours}:${pingHours}:${auditHours}`;
   const nowMs = Date.now();
   if (
-    !forceRefresh &&
+    !options.bypassCache &&
     capacityRowCountCache &&
     capacityRowCountCache.expiresAt > nowMs &&
     capacityRowCountCache.value.cache_key === cacheKey
@@ -556,10 +697,13 @@ async function getCapacityRowCounts(
     return capacityRowCountCache.value;
   }
 
-  let actualRowCounts: Awaited<ReturnType<typeof db.getStorageRowCounts>> | null = null;
+  let actualRowCounts: Awaited<ReturnType<typeof db.getStorageRowCountsFast>> | null = null;
   let expiredRowCounts: Awaited<ReturnType<typeof db.getExpiredRowCounts>> | null = null;
+  const countSource: CapacityRowCountSnapshot['count_source'] = options.scan ? 'scan' : 'counter';
   try {
-    actualRowCounts = await db.getStorageRowCounts(database);
+    actualRowCounts = options.scan
+      ? await db.getStorageRowCounts(database)
+      : await db.getStorageRowCountsFast(database);
   } catch {
     actualRowCounts = null;
   }
@@ -568,6 +712,7 @@ async function getCapacityRowCounts(
       records: new Date(nowMs - recordHours * 60 * 60 * 1000).toISOString(),
       ping_records: new Date(nowMs - pingHours * 60 * 60 * 1000).toISOString(),
       audit_logs: new Date(nowMs - auditHours * 60 * 60 * 1000).toISOString(),
+      notification_deliveries: new Date(nowMs - auditHours * 60 * 60 * 1000).toISOString(),
     });
   } catch {
     expiredRowCounts = null;
@@ -578,6 +723,7 @@ async function getCapacityRowCounts(
     expired_row_counts: expiredRowCounts,
     checked_at: new Date(nowMs).toISOString(),
     cache_key: cacheKey,
+    count_source: countSource,
   };
   capacityRowCountCache = {
     value,
@@ -586,7 +732,7 @@ async function getCapacityRowCounts(
   return value;
 }
 
-export async function buildCapacityEstimate(database: D1Database, options: { forceCounts?: boolean } = {}) {
+export async function buildCapacityEstimate(database: D1Database, options: { forceCounts?: boolean; scanCounts?: boolean } = {}) {
   const nowMs = Date.now();
   if (!options.forceCounts && capacityEstimateCache && capacityEstimateCache.expiresAt > nowMs) {
     return {
@@ -669,10 +815,15 @@ export async function buildCapacityEstimate(database: D1Database, options: { for
   const gpuD1RowsWrittenPerDay = gpuSnapshotsPerDay * GPU_SNAPSHOT_D1_ROWS_WRITTEN;
   const pingD1RowsWrittenPerDay = pingRecordsPerDay * PING_SNAPSHOT_D1_ROWS_WRITTEN;
   const totalEstimatedBusinessRowsPerDay = monitorRecordsPerDay + gpuSnapshotsPerDay + pingRecordsPerDay;
-  const totalEstimatedD1RowsWrittenPerDay =
+  const totalEstimatedInsertD1RowsWrittenPerDay =
     monitorD1RowsWrittenPerDay +
     gpuD1RowsWrittenPerDay +
     pingD1RowsWrittenPerDay;
+  const estimatedHistoryRowsDeletedPerDay = recordEnabled ? totalEstimatedBusinessRowsPerDay : 0;
+  const retentionDeleteD1RowsWrittenPerDay = estimatedHistoryRowsDeletedPerDay * HISTORY_DELETE_D1_ROWS_WRITTEN;
+  const totalEstimatedD1RowsWrittenPerDay =
+    totalEstimatedInsertD1RowsWrittenPerDay +
+    retentionDeleteD1RowsWrittenPerDay;
   const writeAmplifiedD1RowsReadPerDay =
     totalEstimatedD1RowsWrittenPerDay * D1_ROWS_READ_PER_WRITE_ESTIMATE;
   const publicMetadataD1RowsReadPerDay = dailyViewMinutes > 0
@@ -699,7 +850,12 @@ export async function buildCapacityEstimate(database: D1Database, options: { for
     + estimatedGpuSnapshotsRetained * ESTIMATED_GPU_SNAPSHOT_BYTES
     + estimatedPingRecordsRetained * ESTIMATED_PING_SNAPSHOT_BYTES;
   const quotaReference = buildQuotaReference();
-  const rowCounts = await getCapacityRowCounts(database, settings, options.forceCounts);
+  const rowCounts = options.forceCounts || options.scanCounts
+    ? await getCapacityRowCounts(database, settings, {
+      bypassCache: true,
+      scan: Boolean(options.scanCounts),
+    })
+    : null;
   const d1ReferenceRows = {
     free_reference_rows: D1_FREE_RETAINED_ROWS_REFERENCE,
     paid_reference_rows: D1_PAID_RETAINED_ROWS_REFERENCE,
@@ -733,6 +889,9 @@ export async function buildCapacityEstimate(database: D1Database, options: { for
     gpu_d1_rows_written_per_day: gpuD1RowsWrittenPerDay,
     ping_d1_rows_written_per_day: pingD1RowsWrittenPerDay,
     total_estimated_business_rows_per_day: totalEstimatedBusinessRowsPerDay,
+    total_estimated_insert_writes_per_day: totalEstimatedInsertD1RowsWrittenPerDay,
+    estimated_history_rows_deleted_per_day: estimatedHistoryRowsDeletedPerDay,
+    retention_delete_d1_rows_written_per_day: retentionDeleteD1RowsWrittenPerDay,
     total_estimated_writes_per_day: totalEstimatedD1RowsWrittenPerDay,
     write_amplified_d1_rows_read_per_day: writeAmplifiedD1RowsReadPerDay,
     public_metadata_d1_rows_read_per_day: publicMetadataD1RowsReadPerDay,
@@ -743,6 +902,7 @@ export async function buildCapacityEstimate(database: D1Database, options: { for
       monitor_record: MONITOR_RECORD_D1_ROWS_WRITTEN,
       gpu_snapshot: GPU_SNAPSHOT_D1_ROWS_WRITTEN,
       ping_snapshot: PING_SNAPSHOT_D1_ROWS_WRITTEN,
+      history_delete: HISTORY_DELETE_D1_ROWS_WRITTEN,
     },
     d1_read_multipliers: {
       rows_read_per_row_written: D1_ROWS_READ_PER_WRITE_ESTIMATE,
@@ -761,12 +921,13 @@ export async function buildCapacityEstimate(database: D1Database, options: { for
     estimated_ping_records_saved_retained: Math.max(0, estimatedLegacyPingRecordsRetained - estimatedPingRecordsRetained),
     estimated_rows_retained: estimatedRowsRetained,
     estimated_storage_bytes: estimatedStorageBytes,
-    actual_row_counts: rowCounts.actual_row_counts,
-    expired_row_counts: rowCounts.expired_row_counts,
-    row_counts_checked_at: rowCounts.checked_at,
-    row_counts_cache_seconds: CAPACITY_ROW_COUNT_CACHE_MS / 1000,
-    row_counts_cache_key: rowCounts.cache_key,
-    capacity_estimate_cache: options.forceCounts ? 'refresh' : 'miss',
+    actual_row_counts: rowCounts?.actual_row_counts ?? null,
+    expired_row_counts: rowCounts?.expired_row_counts ?? null,
+    row_counts_checked_at: rowCounts?.checked_at ?? null,
+    row_counts_cache_seconds: rowCounts ? CAPACITY_ROW_COUNT_CACHE_MS / 1000 : 0,
+    row_counts_cache_key: rowCounts?.cache_key ?? null,
+    row_counts_source: rowCounts?.count_source ?? null,
+    capacity_estimate_cache: options.forceCounts || options.scanCounts ? 'refresh' : 'miss',
     capacity_estimate_cache_seconds: CAPACITY_ESTIMATE_CACHE_MS / 1000,
     d1_reference_rows: d1ReferenceRows,
     quota_reference: quotaReference,
@@ -777,10 +938,12 @@ export async function buildCapacityEstimate(database: D1Database, options: { for
     ),
     ping_tasks: pingTasksWithEstimates,
   };
-  capacityEstimateCache = {
-    value: estimate,
-    expiresAt: Date.now() + CAPACITY_ESTIMATE_CACHE_MS,
-  };
+  if (!options.forceCounts) {
+    capacityEstimateCache = {
+      value: estimate,
+      expiresAt: Date.now() + CAPACITY_ESTIMATE_CACHE_MS,
+    };
+  }
   return estimate;
 }
 
@@ -793,6 +956,7 @@ async function runMaintenanceCleanup(database: D1Database, username: string, now
     records: new Date(now.getTime() - recordHours * 60 * 60 * 1000).toISOString(),
     ping_records: new Date(now.getTime() - pingHours * 60 * 60 * 1000).toISOString(),
     audit_logs: new Date(now.getTime() - auditHours * 60 * 60 * 1000).toISOString(),
+    notification_deliveries: new Date(now.getTime() - auditHours * 60 * 60 * 1000).toISOString(),
   };
   const expiredBacklogBefore = await db.getExpiredRowCounts(database, before);
   const maxExpiredBacklog = Math.max(
@@ -800,6 +964,7 @@ async function runMaintenanceCleanup(database: D1Database, username: string, now
     expiredBacklogBefore.gpu_records,
     expiredBacklogBefore.ping_records,
     expiredBacklogBefore.audit_logs,
+    expiredBacklogBefore.notification_deliveries,
   );
   const cleanupOptions = {
     maxBatches: Math.min(1000, Math.max(200, Math.ceil(maxExpiredBacklog / 100))),
@@ -808,6 +973,7 @@ async function runMaintenanceCleanup(database: D1Database, username: string, now
     ...(await db.deleteOldRecords(database, before.records, cleanupOptions)),
     ...(await db.deleteOldPingRecords(database, before.ping_records, cleanupOptions)),
     ...(await db.deleteOldAuditLogs(database, before.audit_logs, cleanupOptions)),
+    ...(await db.deleteOldNotificationDeliveries(database, before.notification_deliveries, cleanupOptions)),
   };
   const orphanCleanup = await db.cleanupOrphanClientData(database);
   const expiredBacklogAfter = await db.getExpiredRowCounts(database, before);
@@ -827,10 +993,26 @@ async function runMaintenanceCleanup(database: D1Database, username: string, now
 
 // ============ 客户端管理 ============
 
+function toAdminClientResponse(client: db.Client) {
+  const token = typeof client.token === 'string' ? client.token : '';
+  const tokenPrefix = typeof client.token_prefix === 'string' && client.token_prefix
+    ? client.token_prefix
+    : token && !token.startsWith('sha256:')
+      ? token.slice(0, 8)
+      : '';
+  return {
+    ...client,
+    token: '',
+    token_hash: '',
+    has_token: Boolean(client.token_hash || token),
+    token_prefix: tokenPrefix,
+  };
+}
+
 // 获取所有客户端（含隐藏的）
 adminRoutes.get('/clients', async (c) => {
   const clients = await db.listClients(c.env.DB);
-  return c.json(clients);
+  return c.json(clients.map(toAdminClientResponse));
 });
 
 // 获取单个客户端
@@ -840,7 +1022,7 @@ adminRoutes.get('/clients/:uuid', async (c) => {
   if (!client) {
     return c.json({ error: '客户端不存在' }, 404);
   }
-  return c.json(client);
+  return c.json(toAdminClientResponse(client));
 });
 
 // 添加客户端（手动创建）
@@ -870,7 +1052,7 @@ adminRoutes.post('/clients/add', async (c) => {
 
     await db.insertAuditLog(c.env.DB, c.get('username')!, 'client_add', `添加客户端: ${name}`);
 
-    return c.json({ uuid, token });
+    return c.json({ uuid, token, token_once: true, token_prefix: token.slice(0, 8) });
   } catch (e) {
     return c.json({ error: '创建失败' }, 500);
   }
@@ -916,20 +1098,28 @@ adminRoutes.post('/clients/:uuid/edit', async (c) => {
 
 // 删除客户端
 adminRoutes.post('/clients/:uuid/remove', async (c) => {
-  const uuid = c.req.param('uuid');
-  await db.deleteClient(c.env.DB, uuid);
-  await removeLiveClient(c, uuid);
-  // 同时清除相关记录
-  await db.clearClientRecords(c.env.DB, uuid);
-  const cleanup = await db.pruneClientReferences(c.env.DB, uuid);
-  invalidatePublicMetadataCache();
-  invalidateAgentClientAuthCache({ uuid });
-  invalidateAgentPingTaskCache();
-  invalidateAllowedClientIdsCache();
-  invalidateCapacityEstimateCache();
-  await refreshLivePingTasks(c);
-  await db.insertAuditLog(c.env.DB, c.get('username')!, 'client_remove', `删除客户端: ${uuid}; 清理引用: ${JSON.stringify(cleanup)}`);
-  return c.json({ success: true });
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const reauthError = await requireReauthPassword(c, body, 'client_remove');
+    if (reauthError) return reauthError;
+
+    const uuid = c.req.param('uuid');
+    await db.deleteClient(c.env.DB, uuid);
+    await removeLiveClient(c, uuid);
+    // 同时清除相关记录
+    await db.clearClientRecords(c.env.DB, uuid);
+    const cleanup = await db.pruneClientReferences(c.env.DB, uuid);
+    invalidatePublicMetadataCache();
+    invalidateAgentClientAuthCache({ uuid });
+    invalidateAgentPingTaskCache();
+    invalidateAllowedClientIdsCache();
+    invalidateCapacityEstimateCache();
+    await refreshLivePingTasks(c);
+    await db.insertAuditLog(c.env.DB, c.get('username')!, 'client_remove', `删除客户端: ${uuid}; 清理引用: ${JSON.stringify(cleanup)}`);
+    return c.json({ success: true });
+  } catch {
+    return c.json({ error: '删除失败' }, 500);
+  }
 });
 
 // 获取客户端 Token
@@ -939,11 +1129,20 @@ adminRoutes.get('/clients/:uuid/token', async (c) => {
   if (!client) {
     return c.json({ error: '客户端不存在' }, 404);
   }
-  return c.json({ token: client.token });
+  await db.insertAuditLog(c.env.DB, c.get('username')!, 'client_token_view_blocked', `拒绝回显客户端 Token: ${client.name || uuid}`);
+  return c.json({
+    error: 'Agent Token 只在创建或重置时显示一次；如已丢失，请重置 Token',
+    token_available: false,
+    token_prefix: client.token_prefix || '',
+  }, 410);
 });
 
 adminRoutes.post('/clients/:uuid/token/rotate', async (c) => {
   const uuid = c.req.param('uuid');
+  const body = await c.req.json().catch(() => ({}));
+  const reauthError = await requireReauthPassword(c, body, 'client_token_rotate');
+  if (reauthError) return reauthError;
+
   const client = await db.getClientTokenMeta(c.env.DB, uuid);
   if (!client) {
     return c.json({ error: '客户端不存在' }, 404);
@@ -960,7 +1159,7 @@ adminRoutes.post('/clients/:uuid/token/rotate', async (c) => {
   invalidateAgentClientAuthCache(client);
   invalidateAgentClientAuthCache({ uuid, token });
   await db.insertAuditLog(c.env.DB, c.get('username')!, 'client_token_rotate', `重置客户端 Token: ${client.name || uuid}`);
-  return c.json({ success: true, token });
+  return c.json({ success: true, token, token_once: true, token_prefix: token.slice(0, 8) });
 });
 
 adminRoutes.post('/clients/reorder', async (c) => {
@@ -1020,6 +1219,9 @@ adminRoutes.post('/clients/batch-hide', async (c) => {
 adminRoutes.post('/clients/batch-remove', async (c) => {
   try {
     const body = await c.req.json();
+    const reauthError = await requireReauthPassword(c, body, 'client_batch_remove');
+    if (reauthError) return reauthError;
+
     const parsed = parseUniqueStringList(body.uuids);
     if (!parsed.ok) return c.json({ error: parsed.error }, 400);
     const uuids = parsed.values;
@@ -1055,7 +1257,10 @@ adminRoutes.post('/clients/batch-remove', async (c) => {
 // 清除指定客户端记录
 adminRoutes.post('/record/clear', async (c) => {
   try {
-    const body = await c.req.json();
+    const body = await c.req.json().catch(() => ({}));
+    const reauthError = await requireReauthPassword(c, body, 'record_clear');
+    if (reauthError) return reauthError;
+
     const uuid = body.uuid;
     if (uuid) {
       await db.clearClientRecords(c.env.DB, uuid);
@@ -1070,10 +1275,14 @@ adminRoutes.post('/record/clear', async (c) => {
 
 // 清除所有记录
 adminRoutes.post('/record/clear/all', async (c) => {
-  await db.clearAllRecords(c.env.DB);
+  const body = await c.req.json().catch(() => ({}));
+  const reauthError = await requireReauthPassword(c, body, 'record_clear_all');
+  if (reauthError) return reauthError;
+
+  const deleted = await db.clearAllRecords(c.env.DB);
   invalidateCapacityEstimateCache();
-  await db.insertAuditLog(c.env.DB, c.get('username')!, 'record_clear_all', '清除所有记录');
-  return c.json({ success: true });
+  await db.insertAuditLog(c.env.DB, c.get('username')!, 'record_clear_all', `清除所有记录: ${JSON.stringify(deleted)}`);
+  return c.json({ success: true, deleted });
 });
 
 // ============ Ping 任务管理 ============
@@ -1181,12 +1390,16 @@ adminRoutes.post('/ping/reorder', async (c) => {
 adminRoutes.post('/ping/delete', async (c) => {
   try {
     const body = await c.req.json();
-    await db.deletePingTask(c.env.DB, body.id);
+    const taskId = Number(body.id);
+    if (!Number.isInteger(taskId) || taskId <= 0) {
+      return c.json({ error: '无效的 Ping 任务 ID' }, 400);
+    }
+    await db.deletePingTask(c.env.DB, taskId);
     invalidatePublicMetadataCache();
     invalidateAgentPingTaskCache();
     invalidateCapacityEstimateCache();
-    await refreshLivePingTasks(c);
-    await db.insertAuditLog(c.env.DB, c.get('username')!, 'ping_delete', `删除 Ping 任务: ${body.id}`);
+    await refreshLivePingTasks(c, [taskId]);
+    await db.insertAuditLog(c.env.DB, c.get('username')!, 'ping_delete', `删除 Ping 任务: ${taskId}`);
     return c.json({ success: true });
   } catch {
     return c.json({ error: '删除失败' }, 500);
@@ -1197,15 +1410,26 @@ adminRoutes.post('/ping/delete', async (c) => {
 
 // 获取所有设置
 adminRoutes.get('/settings', async (c) => {
+  const scope = c.req.query('scope');
+  if (scope) {
+    if (!Object.prototype.hasOwnProperty.call(SETTINGS_SCOPE_KEYS, scope)) {
+      return c.json({ error: '未知设置范围' }, 400);
+    }
+    const keys = [...SETTINGS_SCOPE_KEYS[scope as keyof typeof SETTINGS_SCOPE_KEYS]];
+    const settings = buildAdminSettings(await db.getSettingsByKeys(c.env.DB, keys));
+    return c.json(redactSensitiveAdminSettings(Object.fromEntries(keys.map((key) => [key, settings[key]]))));
+  }
+
   const settings = await db.getAllSettings(c.env.DB);
-  return c.json(buildAdminSettings(settings));
+  return c.json(redactSensitiveAdminSettings(buildAdminSettings(settings)));
 });
 
 // 修改设置
 adminRoutes.post('/settings', async (c) => {
   try {
     const body = await c.req.json();
-    const normalized = sanitizeSettingsForStorage(body);
+    const { settingsInput, clearSensitiveKeys } = prepareSettingsUpdateBody(body);
+    const normalized = sanitizeSettingsForStorage(settingsInput);
     if (!normalized.ok) {
       return c.json({ error: '设置校验失败', details: normalized.errors }, 400);
     }
@@ -1213,16 +1437,30 @@ adminRoutes.post('/settings', async (c) => {
     const currentSettings = buildAdminSettings(
       await db.getSettingsByKeys(c.env.DB, Object.keys(normalized.settings)),
     );
+    const settingsForStorage = { ...normalized.settings };
+    const ignoredSensitiveEmptyKeys: string[] = [];
+    for (const [key, value] of Object.entries(settingsForStorage)) {
+      if (
+        SENSITIVE_SETTING_KEY_SET.has(key) &&
+        value === '' &&
+        currentSettings[key] &&
+        !clearSensitiveKeys.has(key)
+      ) {
+        delete settingsForStorage[key];
+        ignoredSensitiveEmptyKeys.push(key);
+      }
+    }
     const changedSettings = Object.fromEntries(
-      Object.entries(normalized.settings)
+      Object.entries(settingsForStorage)
         .filter(([key, value]) => currentSettings[key] !== value),
     );
     const changedKeys = Object.keys(changedSettings);
+    const ignoredKeys = [...normalized.ignoredKeys, ...ignoredSensitiveEmptyKeys];
 
     if (changedKeys.length === 0) {
       return c.json({
         success: true,
-        ignored: normalized.ignoredKeys,
+        ignored: ignoredKeys,
         changed: 0,
         noop: true,
       });
@@ -1231,7 +1469,9 @@ adminRoutes.post('/settings', async (c) => {
     for (const [key, value] of Object.entries(changedSettings)) {
       await db.setSetting(c.env.DB, key, value);
     }
-    invalidateCapacityEstimateCache();
+    if (changedKeys.some((key) => CAPACITY_ESTIMATE_SETTING_KEY_SET.has(key))) {
+      invalidateCapacityEstimateCache();
+    }
     if (changedKeys.some((key) => SETTING_SCHEMA[key as keyof typeof SETTING_SCHEMA]?.public)) {
       invalidatePublicMetadataCache();
     }
@@ -1257,7 +1497,7 @@ adminRoutes.post('/settings', async (c) => {
       }
     }
     await db.insertAuditLog(c.env.DB, c.get('username')!, 'settings_edit', `修改系统设置: ${changedKeys.join(',')}`);
-    return c.json({ success: true, ignored: normalized.ignoredKeys, changed: changedKeys.length, noop: false });
+    return c.json({ success: true, ignored: ignoredKeys, changed: changedKeys.length, noop: false });
   } catch {
     return c.json({ error: '保存失败' }, 500);
   }
@@ -1278,9 +1518,26 @@ adminRoutes.post('/notification/offline/edit', async (c) => {
     const allowedClientIds = await getAllowedClientIds(c.env.DB);
     // 支持批量编辑：数组形式
     const items = Array.isArray(body) ? body : [body];
+
+    // OFF-2: Limit array length to prevent write amplification DoS
+    if (items.length > 1000) {
+      return c.json({ error: '单次最多编辑 1000 条离线通知' }, 400);
+    }
+
+    // Deduplicate by client to prevent redundant writes
+    const seenClients = new Set<string>();
+    const deduped = [];
+    for (const item of items) {
+      const client = typeof item?.client === 'string' ? item.client : '';
+      if (client && !seenClients.has(client)) {
+        seenClients.add(client);
+        deduped.push(item);
+      }
+    }
+
     const normalized = [];
     const errors: string[] = [];
-    for (const [index, item] of items.entries()) {
+    for (const [index, item] of deduped.entries()) {
       const validated = validateOfflineNotificationInput(item, allowedClientIds);
       if (!validated.ok) {
         errors.push(...validated.errors.map(error => `${index}: ${error}`));
@@ -1315,9 +1572,26 @@ adminRoutes.post('/notification/expiry/edit', async (c) => {
     const body = await c.req.json();
     const allowedClientIds = await getAllowedClientIds(c.env.DB);
     const items = Array.isArray(body) ? body : [body];
+
+    // OFF-2: Limit array length to prevent write amplification DoS
+    if (items.length > 1000) {
+      return c.json({ error: '单次最多编辑 1000 条到期通知' }, 400);
+    }
+
+    // Deduplicate by client to prevent redundant writes
+    const seenClients = new Set<string>();
+    const deduped = [];
+    for (const item of items) {
+      const client = typeof item?.client === 'string' ? item.client : '';
+      if (client && !seenClients.has(client)) {
+        seenClients.add(client);
+        deduped.push(item);
+      }
+    }
+
     const normalized = [];
     const errors: string[] = [];
-    for (const [index, item] of items.entries()) {
+    for (const [index, item] of deduped.entries()) {
       const validated = validateExpiryNotificationInput(item, allowedClientIds);
       if (!validated.ok) {
         errors.push(...validated.errors.map(error => `${index}: ${error}`));
@@ -1468,10 +1742,11 @@ adminRoutes.post('/account/username', async (c) => {
     }
 
     await db.updateUserUsername(c.env.DB, userId, nextUsername);
+    const sessionVersion = await db.rotateUserSessionVersion(c.env.DB, userId);
 
     let token: string;
     try {
-      token = await generateToken(userId, nextUsername, c.env);
+      token = await generateToken(userId, nextUsername, c.env, sessionVersion);
     } catch (error) {
       if (error instanceof AuthConfigurationError) {
         console.error('[auth] JWT_SECRET is missing or shorter than 32 bytes');
@@ -1523,6 +1798,18 @@ adminRoutes.post('/account/chpasswd', async (c) => {
 
     const newHash = await hashPassword(body.new_password);
     await db.updateUserPassword(c.env.DB, userId, newHash);
+    const sessionVersion = await db.rotateUserSessionVersion(c.env.DB, userId);
+    let token: string;
+    try {
+      token = await generateToken(userId, username, c.env, sessionVersion);
+    } catch (error) {
+      if (error instanceof AuthConfigurationError) {
+        console.error('[auth] JWT_SECRET is missing or shorter than 32 bytes');
+        return c.json({ error: '服务端 JWT_SECRET 未正确配置' }, 500);
+      }
+      throw error;
+    }
+    setAdminSessionCookie(c, token);
     await db.insertAuditLog(c.env.DB, username, 'chpasswd', '修改密码');
 
     return c.json({ success: true });
@@ -1568,7 +1855,8 @@ adminRoutes.get('/health', async (c) => {
 
 adminRoutes.get('/capacity', async (c) => {
   const forceCounts = c.req.query('refresh_counts') === 'true' || c.req.query('refresh_counts') === '1';
-  return c.json(await buildCapacityEstimate(c.env.DB, { forceCounts }));
+  const scanCounts = c.req.query('scan_counts') === 'true' || c.req.query('scan_counts') === '1';
+  return c.json(await buildCapacityEstimate(c.env.DB, { forceCounts, scanCounts }));
 });
 
 adminRoutes.post('/maintenance/cleanup', async (c) => {
@@ -1584,10 +1872,13 @@ adminRoutes.post('/maintenance/cleanup', async (c) => {
 
 // ============ 备份相关 ============
 
-// 下载加密完整备份（包含配置和 token，不包含账号、审计和历史记录）
+// 下载加密完整备份（包含配置和 Agent token hash，不包含账号、审计和历史记录）
 adminRoutes.post('/download/backup', async (c) => {
   try {
     const body = await c.req.json().catch(() => ({}));
+    const reauthError = await requireReauthPassword(c, body, 'backup_download');
+    if (reauthError) return reauthError;
+
     const backupPassword = typeof body.backup_password === 'string' ? body.backup_password : '';
     const backup = await buildBackupSnapshot(c.env.DB);
     const encrypted = await encryptBackup(backup, backupPassword);
@@ -1602,6 +1893,8 @@ adminRoutes.post('/download/backup', async (c) => {
       `下载加密完整备份: ${JSON.stringify({
         ...summarizeBackup(backup),
         encrypted: true,
+        contains_raw_agent_tokens: false,
+        contains_agent_token_hashes: true,
         contains_sensitive_fields_after_decrypt: true,
         encryption: BACKUP_ENCRYPTION_ALGORITHM,
       })}`,
@@ -1646,6 +1939,11 @@ adminRoutes.post('/upload/backup', async (c) => {
     }
 
     const dryRun = isQueryFlagEnabled(c.req.query('dry_run'));
+    if (!dryRun) {
+      const reauthError = await requireReauthPassword(c, body, 'backup_restore');
+      if (reauthError) return reauthError;
+    }
+
     const confirmation = getRestoreConfirmationState(c, body);
     if (!dryRun && !confirmation.confirmed) {
       return c.json({
@@ -1787,7 +2085,371 @@ adminRoutes.post('/test/sendMessage', async (c) => {
       `Telegram test failed: ${errorDetail(e)}`,
       { auditAction: 'telegram_error', auditUser: c.get('username') || 'system' },
     );
-    return c.json({ error: e.message }, 500);
+    return c.json({ error: '发送失败' }, 502);
+  }
+});
+
+// ============ 计数器管理 API ============
+
+/**
+ * 获取计数器状态
+ * GET /admin/counters/status
+ */
+adminRoutes.get('/counters/status', async (c) => {
+  try {
+    const status = await getCounterStatus(c.env.DB);
+    return c.json(status);
+  } catch (e: any) {
+    // SEC-4: Sanitize error messages to avoid leaking DB schema details
+    const safeMessage = e?.message?.includes('no such table') || e?.message?.includes('SQL')
+      ? '计数器状态查询失败'
+      : (e.message || '计数器状态查询失败');
+    return c.json({ error: safeMessage }, 500);
+  }
+});
+
+/**
+ * 验证计数器准确性
+ * GET /admin/counters/verify
+ */
+adminRoutes.get('/counters/verify', async (c) => {
+  try {
+    const result = await verifyCounters(c.env.DB);
+    return c.json(result);
+  } catch (e: any) {
+    // SEC-4: Sanitize error messages
+    const safeMessage = e?.message?.includes('no such table') || e?.message?.includes('SQL')
+      ? '计数器验证失败'
+      : (e.message || '计数器验证失败');
+    return c.json({ error: safeMessage }, 500);
+  }
+});
+
+/**
+ * 修复计数器
+ * POST /admin/counters/repair
+ */
+adminRoutes.post('/counters/repair', async (c) => {
+  try {
+    const result = await repairCounters(c.env.DB);
+    return c.json(result);
+  } catch (e: any) {
+    // SEC-4: Sanitize error messages
+    const safeMessage = e?.message?.includes('no such table') || e?.message?.includes('SQL')
+      ? '计数器修复失败'
+      : (e.message || '计数器修复失败');
+    return c.json({ error: safeMessage }, 500);
+  }
+});
+
+// ============ Cron 健康监控 API ============
+
+/**
+ * 获取所有Cron任务健康状态
+ * GET /admin/cron/health
+ */
+adminRoutes.get('/cron/health', async (c) => {
+  try {
+    const health = await cronHealth.getCronHealth(c.env.DB);
+    const now = Date.now();
+
+    // 增强健康状态信息
+    const enrichedHealth = health.map(h => ({
+      ...h,
+      is_stale: cronHealth.isCronStale(h, 15),
+      needs_alert: cronHealth.shouldAlertCronHealth(h, 3),
+      last_run_minutes_ago: Math.floor((now - new Date(h.last_run_at).getTime()) / 60000),
+      success_rate: h.total_runs > 0 ? ((h.total_runs - h.total_failures) / h.total_runs * 100).toFixed(1) : '0',
+    }));
+
+    return c.json({ health: enrichedHealth });
+  } catch (e: any) {
+    return c.json({ error: e.message || 'Cron健康状态查询失败' }, 500);
+  }
+});
+
+/**
+ * 获取单个Cron任务健康状态
+ * GET /admin/cron/health/:component
+ */
+adminRoutes.get('/cron/health/:component', async (c) => {
+  try {
+    const component = c.req.param('component');
+    const health = await cronHealth.getCronHealthByComponent(c.env.DB, component);
+
+    if (!health) {
+      return c.json({ error: 'Cron任务不存在' }, 404);
+    }
+
+    const now = Date.now();
+    const enrichedHealth = {
+      ...health,
+      is_stale: cronHealth.isCronStale(health, 15),
+      needs_alert: cronHealth.shouldAlertCronHealth(health, 3),
+      last_run_minutes_ago: Math.floor((now - new Date(health.last_run_at).getTime()) / 60000),
+      success_rate: health.total_runs > 0 ? ((health.total_runs - health.total_failures) / health.total_runs * 100).toFixed(1) : '0',
+    };
+
+    return c.json(enrichedHealth);
+  } catch (e: any) {
+    return c.json({ error: e.message || 'Cron健康状态查询失败' }, 500);
+  }
+});
+
+// ============ JWT Refresh Token API ============
+
+/**
+ * 刷新Access Token
+ * POST /admin/auth/refresh
+ */
+adminRoutes.post('/auth/refresh', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const oldRefreshToken = typeof body.refresh_token === 'string' ? body.refresh_token : '';
+
+    if (!oldRefreshToken) {
+      return c.json({ error: 'Refresh token is required' }, 400);
+    }
+
+    // 验证refresh token
+    const secret = refreshToken.requireJwtSecret(c.env);
+    const payload = await refreshToken.verifyRefreshToken(oldRefreshToken, secret);
+
+    if (!payload) {
+      return c.json({ error: 'Invalid refresh token' }, 401);
+    }
+
+    // 检查是否在黑名单中
+    const isBlacklisted = await refreshToken.isTokenBlacklisted(c.env.DB, payload.jti);
+    if (isBlacklisted) {
+      return c.json({ error: 'Refresh token has been revoked' }, 401);
+    }
+
+    // 检查用户和session version
+    const user = await db.getUserByUuid(c.env.DB, payload.userId);
+    if (!user || Number(user.session_version || 0) !== Number(payload.sessionVersion || 0)) {
+      return c.json({ error: 'Session expired' }, 401);
+    }
+
+    // 生成新的token对
+    const tokenPair = await refreshToken.generateTokenPair(
+      payload.userId,
+      payload.username,
+      secret,
+      payload.sessionVersion,
+    );
+
+    // 将旧的refresh token加入黑名单
+    await refreshToken.blacklistToken(
+      c.env.DB,
+      payload.jti,
+      payload.userId,
+      Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 30, // 30天后过期
+      'refreshed',
+    );
+
+    await db.insertAuditLog(
+      c.env.DB,
+      payload.username,
+      'token_refresh',
+      'Access token refreshed',
+    );
+
+    return c.json({
+      access_token: tokenPair.accessToken,
+      refresh_token: tokenPair.refreshToken,
+      expires_in: refreshToken.ACCESS_TOKEN_EXPIRY_SEC,
+    });
+  } catch (e: any) {
+    return c.json({ error: e.message || 'Token refresh failed' }, 500);
+  }
+});
+
+/**
+ * 撤销所有用户token（登出所有设备）
+ * POST /admin/auth/revoke-all
+ */
+adminRoutes.post('/auth/revoke-all', async (c) => {
+  try {
+    const userId = c.get('userId');
+    const username = c.get('username');
+
+    await refreshToken.revokeAllUserTokens(c.env.DB, userId);
+
+    await db.insertAuditLog(
+      c.env.DB,
+      username,
+      'revoke_all_tokens',
+      '用户撤销所有token（登出所有设备）',
+    );
+
+    return c.json({ success: true, message: '所有设备已登出' });
+  } catch (e: any) {
+    return c.json({ error: e.message || 'Token revocation failed' }, 500);
+  }
+});
+
+// ============ 密码管理 API ============
+
+/**
+ * 修改密码
+ * POST /admin/auth/change-password
+ */
+adminRoutes.post('/auth/change-password', async (c) => {
+  try {
+    const body = await c.req.json().catch(() => ({}));
+    const oldPassword = typeof body.old_password === 'string' ? body.old_password : '';
+    const newPassword = typeof body.new_password === 'string' ? body.new_password : '';
+    const userId = c.get('userId');
+    const username = c.get('username');
+
+    if (!oldPassword || !newPassword) {
+      return c.json({ error: '旧密码和新密码不能为空' }, 400);
+    }
+
+    // 验证新密码强度
+    const passwordError = passwordReset.validatePasswordStrength(newPassword);
+    if (passwordError) {
+      return c.json({ error: passwordError }, 400);
+    }
+
+    // 验证旧密码
+    const user = await db.getUserByUuid(c.env.DB, userId);
+    if (!user) {
+      return c.json({ error: '用户不存在' }, 404);
+    }
+
+    const isOldPasswordValid = await verifyPassword(oldPassword, user.passwd);
+    if (!isOldPasswordValid) {
+      await db.insertAuditLog(
+        c.env.DB,
+        username,
+        'change_password_failed',
+        '修改密码失败：旧密码错误',
+        'warning',
+      );
+      return c.json({ error: '旧密码错误' }, 401);
+    }
+
+    // 更新密码
+    const hashedPassword = await hashPassword(newPassword);
+    const now = new Date().toISOString();
+
+    await c.env.DB.prepare(`
+      UPDATE users
+      SET passwd = ?,
+          session_version = session_version + 1,
+          updated_at = ?
+      WHERE uuid = ?
+    `).bind(hashedPassword, now, userId).run();
+
+    await db.insertAuditLog(
+      c.env.DB,
+      username,
+      'change_password',
+      '密码修改成功',
+    );
+
+    return c.json({ success: true, message: '密码修改成功，请重新登录' });
+  } catch (e: any) {
+    return c.json({ error: e.message || '密码修改失败' }, 500);
+  }
+});
+
+// ============ 系统健康检查 API ============
+
+/**
+ * 健康检查端点（详细版）
+ * GET /admin/health
+ */
+adminRoutes.get('/health', async (c) => {
+  try {
+    const startTime = Date.now();
+
+    // 数据库健康检查
+    const dbCheck = await c.env.DB.prepare('SELECT 1 as ok').first();
+    const dbHealthy = !!dbCheck;
+
+    // Cron健康检查
+    const cronHealthRows = await cronHealth.getCronHealth(c.env.DB);
+    const unhealthyCrons = cronHealthRows.filter(h => h.consecutive_failures >= 3);
+
+    // 通知队列检查
+    const queueStats = await c.env.DB.prepare(`
+      SELECT
+        status,
+        COUNT(*) as count
+      FROM notification_queue
+      GROUP BY status
+    `).all();
+
+    const pendingCount = Number(queueStats.results?.find((r: any) => r.status === 'pending')?.count || 0);
+
+    // Token黑名单大小
+    const nowIso = new Date().toISOString();
+    const blacklistSize = await c.env.DB.prepare(`
+      SELECT COUNT(*) as count FROM token_blacklist
+      WHERE expires_at > ?
+    `).bind(nowIso).first<{ count: number }>();
+
+    const responseTime = Date.now() - startTime;
+
+    const health = {
+      status: dbHealthy && unhealthyCrons.length === 0 && pendingCount < 100 ? 'healthy' : 'degraded',
+      timestamp: new Date().toISOString(),
+      response_time_ms: responseTime,
+      checks: {
+        database: {
+          healthy: dbHealthy,
+          response_time_ms: responseTime,
+        },
+        cron: {
+          healthy: unhealthyCrons.length === 0,
+          total_tasks: cronHealthRows.length,
+          unhealthy_tasks: unhealthyCrons.length,
+          failing: unhealthyCrons.map(h => ({
+            component: h.component,
+            consecutive_failures: h.consecutive_failures,
+            last_error: h.last_error,
+          })),
+        },
+        notification_queue: {
+          healthy: pendingCount < 100,
+          pending: pendingCount,
+          total: queueStats.results?.reduce((sum: number, r: any) => sum + Number(r.count), 0) || 0,
+        },
+        token_blacklist: {
+          size: blacklistSize?.count || 0,
+        },
+      },
+    };
+
+    return c.json(health);
+  } catch (e: any) {
+    return c.json({
+      status: 'unhealthy',
+      timestamp: new Date().toISOString(),
+      error: e.message || '健康检查失败',
+    }, 500);
+  }
+});
+
+/**
+ * 简单健康检查端点（用于监控）
+ * GET /admin/healthz
+ */
+adminRoutes.get('/healthz', async (c) => {
+  try {
+    // 快速数据库检查
+    const dbCheck = await c.env.DB.prepare('SELECT 1 as ok').first();
+
+    if (dbCheck) {
+      return c.text('OK', 200);
+    } else {
+      return c.text('Database check failed', 503);
+    }
+  } catch (e) {
+    return c.text('Unhealthy', 503);
   }
 });
 
